@@ -1,0 +1,40 @@
+{
+  "name": "wealth-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "fetch-amfi-active-schemes": "node scripts/fetch-amfi-active-schemes.mjs",
+    "fetch-screener-snapshot": "node scripts/fetch-screener-snapshot.mjs",
+    "fetch-screener-snapshot-retry": "node scripts/fetch-screener-snapshot.mjs --retry-failed",
+    "fetch-benchmark-seed": "node scripts/fetch-benchmark-seed.mjs",
+    "sync-assets": "node scripts/sync-assets.mjs",
+    "vendor-mobile": "node scripts/vendor-mobile.mjs",
+    "proxy": "CORS_PROXY_PORT=3457 node server/proxy.mjs",
+    "patch-vendor": "node scripts/patch-vendor-for-web.mjs",
+    "dev": "npm run sync-assets && npm run patch-vendor && concurrently -k \"npm run proxy\" \"vite\"",
+    "build": "npm run vendor-mobile && npm run sync-assets && npm run patch-vendor && vite build",
+    "start": "node server/proxy.mjs",
+    "preview": "npm run start",
+    "typecheck": "tsc -b --noEmit"
+  },
+  "dependencies": {
+    "decimal.js": "^10.6.0",
+    "katex": "^0.17.0",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "concurrently": "^9.1.2",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
+}

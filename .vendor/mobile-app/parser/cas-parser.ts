@@ -1,0 +1,1689 @@
+/**
+ * Full TypeScript port of cas_parser.py
+ * Parses CAMS + KFintech Consolidated Account Statement (CAS) text/PDFs.
+ *
+ * - Core parsing runs everywhere (Expo Hermes, Node, browser).
+ * - On Expo, register registerPdfTextExtractor (WebView + bundled PDF.js); see App.tsx.
+ * - Node + pdfjs-dist: import `./cas-parser.node` only from CLI/scripts — not from App.
+ *
+ * Dependencies: decimal.js
+ */
+
+import Decimal from "decimal.js";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface Transaction {
+  date: string;
+  description: string;
+  amount_inr: string;
+  units: string;
+  price_inr: string;
+  unit_balance: string;
+  is_synthetic?: string;
+}
+
+/** opening + Σ(non-synthetic transaction units) vs statement closing; optional last-row balance cross-check. */
+export interface UnitsReconciliation {
+  ok: boolean;
+  reason?: string;
+  opening_units?: string;
+  closing_units_statement?: string;
+  sum_of_transaction_units?: string;
+  computed_closing?: string;
+  diff_computed_minus_statement?: string;
+  sum_check_ok: boolean;
+  last_row_unit_balance?: string | null;
+  last_row_matches_closing: boolean | null;
+  transaction_rows_with_unit_balance?: number;
+}
+
+export interface Holding {
+  amc: string | null;
+  folio_no: string;
+  pan: string | null;
+  kyc_status: string | null;
+  pan_status: string | null;
+  nominee_1: string | null;
+  nominee_2: string | null;
+  nominee_3: string | null;
+  investor_name_on_folio: string | null;
+  scheme_code: string | null;
+  scheme_name: string | null;
+  scheme_name_simple?: string | null;
+  scheme_demat_mode?: string | null;
+  scheme_former_name?: string | null;
+  scheme_info?: string | null;
+  isin: string | null;
+  advisor: string | null;
+  registrar: string | null;
+  opening_units: string | null;
+  closing_units: string | null;
+  nav_date: string | null;
+  nav_inr: string | null;
+  cost_value_inr: string | null;
+  market_value_date: string | null;
+  market_value_inr: string | null;
+  transactions: Transaction[];
+  mf_amfi_code?: string;
+  mf_name?: string;
+  mf_plan_type?: string;
+  mf_nav?: string;
+  mf_expense_ratio?: string;
+  mf_aum?: string;
+  mf_category?: string;
+  mf_family_id?: string;
+  mf_amc_name?: string;
+  units_reconciliation?: UnitsReconciliation;
+}
+
+export interface PortfolioSummaryRow {
+  mutual_fund: string;
+  cost_value_inr: string;
+  market_value_inr: string;
+}
+
+export interface ParsedCAS {
+  source_file: string;
+  period_from: string | null;
+  period_to: string | null;
+  investor_name: string | null;
+  email: string | null;
+  mobile: string | null;
+  address: string | null;
+  investor_pan: string | null;
+  portfolio_summary: PortfolioSummaryRow[];
+  holdings: Holding[];
+  units_verification?: {
+    all_holdings_ok: boolean;
+    failed_folio_count: number;
+    holdings_checked: number;
+  };
+}
+
+const MFDATA_SEARCH_URL = "https://mfdata.in/api/v1/search?q=";
+
+// ---------------------------------------------------------------------------
+// Boilerplate
+// ---------------------------------------------------------------------------
+
+const BOILER_LINE_RES: RegExp[] = [
+  /^7101-eviL$/,
+  /^4\.\d+V:noisreV$/,
+  /^-?SWSACSMAC$/,
+  /^Consolidated Account Statement$/,
+  /^Date\s+Transaction\s+Amount\s+Units\s+Price\s+Unit\s*$/,
+  /^\(INR\)\s+\(INR\)\s+Balance\s*$/,
+];
+
+function stripBoiler(lines: string[]): string[] {
+  const out: string[] = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) {
+      if (out.length && out[out.length - 1] !== "") out.push("");
+      continue;
+    }
+    if (BOILER_LINE_RES.some((r) => r.test(line))) continue;
+    if (
+      line === "Mutual Fund" &&
+      out.length &&
+      out.slice(-5).join("\n").includes("PORTFOLIO SUMMARY")
+    ) {
+      out.push(line);
+      continue;
+    }
+    if (/^Cost Value\s+Market Value$/.test(line)) continue;
+    out.push(line);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Money
+// ---------------------------------------------------------------------------
+
+function parseMoney(s: string): Decimal {
+  let t = s.trim();
+  const neg = t.startsWith("(") && t.endsWith(")");
+  t = t.replace(/^\(|\)$/g, "").replace(/,/g, "");
+  if (!t) throw new Error("empty money string");
+  const d = new Decimal(t);
+  return neg ? d.negated() : d;
+}
+
+/**
+ * Stringify a CAS money token like Python `str(Decimal(...))` (preserves fractional width from the source).
+ */
+function fmtCasMoneyField(raw: string): string {
+  let t = raw.replace(/,/g, "").trim();
+  const negParen = t.startsWith("(") && t.endsWith(")");
+  if (negParen) t = t.slice(1, -1).trim();
+  if (!t) return "0";
+  const fracLen = t.includes(".") ? t.split(".")[1]!.length : 0;
+  let d: Decimal;
+  try {
+    d = new Decimal(t);
+  } catch {
+    return raw.replace(/,/g, "").trim();
+  }
+  const val = negParen ? d.negated() : d;
+  return val.toFixed(fracLen);
+}
+
+const UNIT_RECON_TOLERANCE = new Decimal("0.0005");
+
+function safeParseMoneyOpt(s: string | null | undefined): Decimal | null {
+  if (s == null || !String(s).trim()) return null;
+  try {
+    return parseMoney(String(s));
+  } catch {
+    return null;
+  }
+}
+
+/** opening + Σ(transaction units) ≈ closing; ignores synthetic rows and rows with empty units. */
+export function verifyHoldingUnitReconciliation(h: Holding): UnitsReconciliation {
+  const opening = safeParseMoneyOpt(h.opening_units);
+  const closing = safeParseMoneyOpt(h.closing_units);
+  if (opening == null || closing == null) {
+    return {
+      ok: false,
+      reason: "missing_opening_or_closing",
+      sum_check_ok: false,
+      last_row_matches_closing: null,
+    };
+  }
+  let unitSum = new Decimal(0);
+  let lastUb: Decimal | null = null;
+  let balanceRows = 0;
+  for (const tx of h.transactions) {
+    if (tx.is_synthetic === "true") continue;
+    const u = (tx.units ?? "").trim();
+    if (u) {
+      try {
+        unitSum = unitSum.plus(parseMoney(u));
+      } catch {
+        /* ignore bad row */
+      }
+    }
+    const ub = (tx.unit_balance ?? "").trim();
+    if (ub) {
+      try {
+        lastUb = parseMoney(ub);
+        balanceRows += 1;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  const computed = opening.plus(unitSum);
+  const diff = computed.minus(closing);
+  const sumOk = diff.abs().lte(UNIT_RECON_TOLERANCE);
+  let lastOk: boolean | null = null;
+  if (lastUb != null) {
+    lastOk = lastUb.minus(closing).abs().lte(UNIT_RECON_TOLERANCE);
+  }
+  const allOk = sumOk && lastOk !== false;
+  return {
+    ok: allOk,
+    opening_units: opening.toString(),
+    closing_units_statement: closing.toString(),
+    sum_of_transaction_units: unitSum.toString(),
+    computed_closing: computed.toString(),
+    diff_computed_minus_statement: diff.toString(),
+    sum_check_ok: sumOk,
+    last_row_unit_balance: lastUb != null ? lastUb.toString() : null,
+    last_row_matches_closing: lastOk,
+    transaction_rows_with_unit_balance: balanceRows,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+const NUM_TAIL =
+  /^(?<head>.+?)\s+(?<amt>\(?[\d,]+(?:\.\d+)?\)?)\s+(?<units>\(?[\d,]+(?:\.\d+)?\)?)\s+(?<price>[\d,]+(?:\.\d+)?)\s+(?<balance>[\d,]+(?:\.\d+)?)\s*$/;
+
+const FEE_TAIL = /^(?<desc>\*\*\* .+ \*\*\*)\s+(?<fee>[\d,]+(?:\.\d+)?)\s*$/;
+
+/** pdf.js sometimes splits "*** STT Paid ***" / "*** Stamp Duty ***" and "DD-Mon-YYYY amount" across two lines. */
+function coalesceSplitFeeLines(lines: string[]): string[] {
+  const feeOnly = /^\*\*\*\s*.+\*\*\*\s*$/;
+  const dateAmount = /^(\d{2}-[A-Za-z]{3}-\d{4})\s+([\d,]+(?:\.\d+)?)\s*$/;
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i].trim();
+    if (feeOnly.test(ln) && i + 1 < lines.length) {
+      const m = dateAmount.exec(lines[i + 1].trim());
+      if (m) {
+        out.push(`${m[1]} ${ln} ${m[2]}`);
+        i++;
+        continue;
+      }
+    }
+    out.push(ln);
+  }
+  return out;
+}
+
+/** When PDF text glues two txn rows on one line, split before each date (pdfplumber often emits separate lines). */
+function expandMultiDateLines(lines: string[]): string[] {
+  const dateRe = /\d{2}-[A-Za-z]{3}-\d{4}/g;
+  const out: string[] = [];
+  for (const raw of lines) {
+    const ln = raw.trim();
+    if (!ln) continue;
+    const matches = [...ln.matchAll(dateRe)];
+    if (matches.length <= 1) {
+      out.push(ln);
+      continue;
+    }
+    for (let i = 0; i < matches.length; i++) {
+      const start = matches[i].index ?? 0;
+      const end =
+        i + 1 < matches.length ? (matches[i + 1].index ?? ln.length) : ln.length;
+      const seg = ln.slice(start, end).trim();
+      if (seg) out.push(seg);
+    }
+  }
+  return out;
+}
+
+/** Same noise as pdfplumber: standalone "less STT" is skipped by the line iterator. */
+function dropLessSttOnlyLines(lines: string[]): string[] {
+  return lines.filter((ln) => !/^less STT$/i.test(ln.trim()));
+}
+
+/** Lone balance token on the line before a split "DD-Mon-YYYY …" row; merge when pdf.js omits balance on the date line (not only when amounts start with "("). */
+function mergeForwardBareBalanceBeforeParenDate(lines: string[]): string[] {
+  const dateRx = /^\d{2}-[A-Za-z]{3}-\d{4}\b/;
+  const bare = /^[\d,]+(?:\.\d+)?$/;
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const t = lines[i]!.trim();
+    if (bare.test(t) && !dateRx.test(t) && i + 1 < lines.length) {
+      const nxt = lines[i + 1]!.trim();
+      if (!NUM_TAIL.test(nxt)) {
+        const dm = /^(\d{2}-[A-Za-z]{3}-\d{4})\s+/.exec(nxt);
+        if (dm) {
+          const candidate = `${nxt} ${t}`.replace(/\s+/g, " ").trim();
+          if (NUM_TAIL.test(candidate)) {
+            out.push(candidate);
+            i += 2;
+            continue;
+          }
+        }
+      }
+    }
+    out.push(lines[i]!);
+    i++;
+  }
+  return out;
+}
+
+/**
+ * pdf.js can emit "…description…  22,692.429" then "26-Jun-2014 (25,000.00) …" on the next line.
+ */
+function splitDescTrailingBalance(line: string): { desc: string; balToken: string } | null {
+  const t = line.trim();
+  const mm = /([\d,]+(?:\.\d+)?)\s*$/.exec(t);
+  if (!mm || mm.index === undefined) return null;
+  const head = t.slice(0, mm.index).trim();
+  if (!head || /^\d/.test(head) || /^\(/.test(head)) return null;
+  if (/\d{2}-[A-Za-z]{3}-\d{4}/.test(head)) return null;
+  if (!/[A-Za-z]/.test(head)) return null;
+  return { desc: head.trim(), balToken: mm[1].trim() };
+}
+
+/** Line is only the four money columns (Amount, Units, Price, Balance) for the previous txn; pdf.js often puts this on its own line after the date+narration row. */
+const ORPHAN_TXN_AMOUNT_TAIL =
+  /^(?:\(?[\d,]+(?:\.\d+)?\)?)\s+(?:\(?[\d,]+(?:\.\d+)?\)?)\s+[\d,]+(?:\.\d+)?\s+[\d,]+(?:\.\d+)?\s*$/;
+
+/** SIP label line pdf.js places between one txn's amount tail and the next txn's narration. */
+const INSTALMENT_MARKER = /^Instalment\s+\d+\s*\/\s*\d+/i;
+
+/**
+ * pdf.js can wrap narration before "DD-Mon-YYYY (amount)..." whereas pdfplumber keeps the date first.
+ */
+function hoistSplitAmountDateLines(lines: string[]): string[] {
+  const dateRx = /^\d{2}-[A-Za-z]{3}-\d{4}\b/;
+  const bareBalance = /^[\d,]+(?:\.\d+)?$/;
+  const out: string[] = [];
+  for (const raw of lines) {
+    const ln = raw.trim();
+    if (!ln) continue;
+    const dm = /^(\d{2}-[A-Za-z]{3}-\d{4})\s+/.exec(ln);
+    if (dm) {
+      const rest = ln.slice(dm[0].length).trim();
+      const hoistParenOrNeg = /^\(|^-[\d,]/.test(rest);
+      const hoistPosNumsIncomplete =
+        /^[\d,]+(?:\.\d+)?\s/.test(rest) && !NUM_TAIL.test(ln.trim());
+      if (hoistParenOrNeg || hoistPosNumsIncomplete) {
+        const pre: string[] = [];
+        while (out.length && !dateRx.test(out[out.length - 1]!.trim())) {
+          const cand = out[out.length - 1]!.trim();
+          if (ORPHAN_TXN_AMOUNT_TAIL.test(cand) || INSTALMENT_MARKER.test(cand)) break;
+          pre.unshift(out.pop()!);
+        }
+        if (pre.length) {
+          if (
+            pre.length === 1 &&
+            bareBalance.test(pre[0]!.trim()) &&
+            /^\(/.test(rest)
+          ) {
+            out.push(pre[0]!);
+            out.push(ln);
+            continue;
+          }
+          if (pre.length === 1) {
+            const st = splitDescTrailingBalance(pre[0]!);
+            if (st) {
+              out.push(`${dm[1]} ${st.desc} ${rest} ${st.balToken}`.replace(/\s+/g, " ").trim());
+              continue;
+            }
+          }
+          let trailing = "";
+          if (pre.length >= 2 && bareBalance.test(pre[pre.length - 1]!.trim())) {
+            const preHead = pre.slice(0, -1);
+            const withoutTrail = `${dm[1]} ${preHead.join(" ")} ${rest}`.replace(/\s+/g, " ").trim();
+            if (!NUM_TAIL.test(withoutTrail)) {
+              trailing = pre.pop()!.trim();
+            }
+          }
+          let merged = `${dm[1]} ${pre.join(" ")} ${rest}`.replace(/\s+/g, " ").trim();
+          if (trailing) merged = `${merged} ${trailing}`;
+          out.push(merged);
+          continue;
+        }
+      }
+    }
+    out.push(ln);
+  }
+  return out;
+}
+
+/** pdf.js can emit a lone "STT" line (pdfplumber doesn't); drop it to mirror python's skipped line. */
+function dropLoneSttLine(lines: string[]): string[] {
+  return lines.filter((ln) => !/^STT$/i.test(ln.trim()));
+}
+
+/** CAMS repeats table headers after page breaks inside a folio; drop those lines from the txn body. */
+function stripEmbeddedPageBoilerFromTxnLines(lines: string[]): string[] {
+  const drop = (t: string) =>
+    /^Page\s+\d+\s+of\s+\d+$/i.test(t) ||
+    /^CAMSCASWS-/i.test(t) ||
+    /^Consolidated Account Statement$/i.test(t) ||
+    /^Date\s+Transaction\s+Amount\s+Units\s+Price\s+Unit\s*$/i.test(t) ||
+    /^\(INR\)\s+\(INR\)\s+Balance$/i.test(t) ||
+    /^\d{2}-[A-Za-z]{3}-\d{4}\s+To\s+\d{2}-[A-Za-z]{3}-\d{4}$/.test(t);
+  return lines.filter((ln) => !drop(ln.trim()));
+}
+
+/**
+ * pdf.js sometimes emits the closing unit balance column as a lone line before the first txn;
+ * merge it onto the first amount line when that line only has 3 numbers (pdfplumber keeps four).
+ */
+function relocateLeadingBalanceFragment(lines: string[]): string[] {
+  const dateRx = /^\d{2}-[A-Za-z]{3}-\d{4}\b/;
+  const numOnly = /^[\d,]+(?:\.\d+)?$/;
+  if (lines.length < 3) return lines;
+  if (!numOnly.test(lines[0]!.trim()) || dateRx.test(lines[0]!)) return lines;
+  const frag = lines[0]!.trim();
+  if (!dateRx.test(lines[1]!.trim())) return lines.slice(1);
+  const numsLine = lines[2]!.trim();
+  const threeTail = /^([\d,]+(?:\.\d+)?)\s+([\d,]+(?:\.\d+)?)\s+([\d,]+(?:\.\d+)?)$/.test(numsLine);
+  if (!threeTail) return lines.slice(1);
+  const rest = lines.slice(1);
+  rest[1] = `${rest[1]} ${frag}`;
+  return rest;
+}
+
+function preprocessTransactionBodyLines(body: string): string[] {
+  const split = relocateLeadingBalanceFragment(
+    stripEmbeddedPageBoilerFromTxnLines(
+      body
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean),
+    ),
+  );
+  return dropLoneSttLine(
+    mergeForwardBareBalanceBeforeParenDate(
+      hoistSplitAmountDateLines(
+        dropLessSttOnlyLines(expandMultiDateLines(coalesceSplitFeeLines(split))),
+      ),
+    ),
+  );
+}
+
+function* iterTransactionLines(body: string): Generator<string> {
+  const lines = preprocessTransactionBodyLines(body);
+  let i = 0;
+  while (i < lines.length) {
+    const ln = lines[i];
+    if (/^\d{2}-[A-Za-z]{3}-\d{4}/.test(ln)) {
+      let merged = ln;
+      let j = i + 1;
+      while (j < lines.length) {
+        const nxt = lines[j];
+        if (/^\d{2}-[A-Za-z]{3}-\d{4}/.test(nxt)) break;
+        const md = /^(\d{2}-[A-Za-z]{3}-\d{4})\s+/.exec(merged);
+        const rest = md ? merged.slice(md[0].length).trim() : "";
+        if (md && FEE_TAIL.test(rest)) break;
+        if (NUM_TAIL.test(merged)) break;
+        merged = `${merged} ${nxt}`;
+        j++;
+      }
+      yield merged;
+      i = j;
+    } else {
+      i++;
+    }
+  }
+}
+
+function parseTransactions(section: string): Transaction[] {
+  if (section.includes("*** No transactions during this statement period ***")) return [];
+
+  const mOpen = /Opening Unit Balance:\s*([\d,]+(?:\.\d+)?)/.exec(section);
+  const mClose = /Closing Unit Balance:/.exec(section);
+  if (!mOpen || !mClose || mOpen.index === undefined || mClose.index === undefined) return [];
+
+  const body = section.slice(mOpen.index + mOpen[0].length, mClose.index);
+  const txs: Transaction[] = [];
+
+  for (const row of iterTransactionLines(body)) {
+    const mDate = /^(\d{2}-[A-Za-z]{3}-\d{4})\s+/.exec(row);
+    if (!mDate) continue;
+    const dateS = mDate[1];
+    const rest = row.slice(mDate[0].length).trim();
+
+    const feeM = FEE_TAIL.exec(rest);
+    if (feeM?.groups) {
+      try {
+        parseMoney(feeM.groups.fee);
+        txs.push({
+          date: dateS,
+          description: feeM.groups.desc.trim(),
+          amount_inr: fmtCasMoneyField(feeM.groups.fee),
+          units: "",
+          price_inr: "",
+          unit_balance: "",
+        });
+      } catch {
+        continue;
+      }
+      continue;
+    }
+
+    const m = NUM_TAIL.exec(rest);
+    if (!m?.groups) continue;
+    try {
+      parseMoney(m.groups.amt);
+      parseMoney(m.groups.units);
+      parseMoney(m.groups.price);
+      parseMoney(m.groups.balance);
+      txs.push({
+        date: dateS,
+        description: m.groups.head.replace(/\s+/g, " ").trim(),
+        amount_inr: fmtCasMoneyField(m.groups.amt),
+        units: fmtCasMoneyField(m.groups.units),
+        price_inr: fmtCasMoneyField(m.groups.price),
+        unit_balance: fmtCasMoneyField(m.groups.balance),
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  return txs;
+}
+
+const CLOSING_RE =
+  /Closing Unit Balance:\s*([\d,]+(?:\.\d+)?)\s+NAV on\s*([^:]+):\s*INR\s*([\d,]+(?:\.\d+)?)\s+Total Cost Value:\s*([\d,]+(?:\.\d+)?)\s+Market Value on\s*([^:]+):\s*INR\s*([\d,]+(?:\.\d+)?)/i;
+
+/** Strip CAMS/KFin registrar tokens that pdf.js often interleaves before the real scheme name. */
+function stripRegistrarNoise(s: string): string {
+  let t = s;
+  for (let i = 0; i < 4; i++) {
+    const next = t
+      .replace(/\bRegistrar\s*:\s*(?:CAMS\s+)?[A-Z0-9]+\s*-\s*/gi, "")
+      .replace(/\bRegistrar\s*:\s*[A-Za-z0-9]+\s*-\s*/gi, "");
+    if (next === t) break;
+    t = next;
+  }
+  return t.replace(/\s+/g, " ").trim();
+}
+
+function normalizeSchemeName(name: string): string {
+  let s = (name || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^\s*[A-Z0-9]{2,12}\s*-\s*/i, "")
+    .replace(/\bRegistrar\s*:?\s*[A-Za-z0-9 ]+(?:\s*-\s*)?/gi, " ")
+    .replace(/\bAdvisor(?:\s*Code)?\b.*$/i, " ")
+    .replace(/\bReinvest\s*\([^)]*Advisor[^)]*\)/gi, " Reinvest ")
+    .replace(/\([^)]*Advisor[^)]*\)/gi, " ")
+    .replace(/\bReinvest\s*\([^)]*$/gi, " ")
+    .replace(/\bISIN\s*:?\s*I\s*N\s*F(?:\s*[A-Z0-9]){9}\b/gi, " ")
+    .replace(/\bI\s*N\s*F(?:\s*[A-Z0-9]){9}\b/gi, " ")
+    .replace(/\s+\)/g, ")")
+    .replace(/\(\s+/g, "(")
+    .replace(/\s+,/g, ",")
+    .replace(/\s*\/\s*/g, "/")
+    .replace(/\bU\s*\/\s*S\b/gi, "U/S")
+    .replace(/\bU\s*\.\s*S\s*\./gi, "U.S.")
+    .replace(/\bEx\s*-\s*bank\b/gi, "Ex-bank")
+    .replace(/\bFund\s*-\s*\(/gi, "Fund- (")
+    .replace(/\bGrowth\s*-\s*Direct\b/gi, "Growth-Direct")
+    .replace(/\bNon\s*-\s*Demat\b/gi, "Non-Demat")
+    .replace(/\b80\s+C\b/gi, "80C")
+    .replace(/PF,/g, "PF ,")
+    .replace(/\s*#\s*/g, "#")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s*-\s*$/, "")
+    .trim();
+  if (/^Bandhan\b/i.test(s)) {
+    s = s.replace(/\bFund\s*-\s*Direct Plan\s*-\s*Growth\b/gi, "Fund-Direct Plan-Growth");
+  }
+  s = s.replace(
+    /^Kotak Midcap Fund\s*-\s*Direct Plan\s*-\s*Growth\b/i,
+    "Kotak Midcap Fund- Direct Plan - Growth",
+  );
+  return s;
+}
+
+function cleanAdvisorValue(raw: string): string {
+  let s = (raw || "").replace(/\bRegistrar\s*:?\s*[A-Za-z]+\b/gi, " ");
+  s = s.replace(/\s+/g, " ").trim().replace(/^[-: ]+|[-: ]+$/g, "");
+  const compact = s.replace(/\s+/g, "");
+  const compactCode = compact.match(/\b(?:INA\d{9}|INZ\d{9}|ARN-?\d+|DIRECT)\b/i);
+  if (compactCode?.[0]) return compactCode[0].toUpperCase();
+  const codes = s.match(/\b(?:INA\d{9}|ARN-?\d+|DIRECT)\b/gi);
+  if (codes?.length) return codes[codes.length - 1]!.trim();
+  return s;
+}
+
+function extractSchemeComponents(name: string): {
+  schemeNameSimple: string | null;
+  schemeDematMode: string | null;
+  schemeFormerName: string | null;
+  schemeInfo: string | null;
+} {
+  let s = (name || "").replace(/\s+/g, " ").trim();
+  let schemeDematMode: string | null = null;
+  let schemeFormerName: string | null = null;
+
+  const dematMatch = /\(\s*(Non\s*-\s*Demat|Demat)\s*\)/i.exec(s);
+  if (dematMatch) {
+    schemeDematMode = dematMatch[1]!.replace(/\s*-\s*/g, "-").replace(/\s+/g, "");
+    if (/^non-?demat$/i.test(schemeDematMode)) schemeDematMode = "Non-Demat";
+    else if (/^demat$/i.test(schemeDematMode)) schemeDematMode = "Demat";
+    s = s.replace(/\(\s*(?:Non\s*-\s*Demat|Demat)\s*\)/gi, " ");
+  }
+
+  let formerMatch = /\((formerly[^)]*)\)/i.exec(s);
+  if (!formerMatch) formerMatch = /\((erstwhile[^)]*)\)/i.exec(s);
+  if (formerMatch) {
+    schemeFormerName = formerMatch[1]!.trim().replace(/PF,/g, "PF ,");
+    s = s.replace(formerMatch[0], " ");
+  }
+
+  s = s.replace(/\s{2,}/g, " ").trim().replace(/\s*-\s*$/, "").trim();
+
+  // Priority 1: split at last marker ("Fund" or "FOF"), if present.
+  // Priority 2: otherwise split at first " - ".
+  const infoParts: string[] = [];
+  let schemeNameSimple: string | null = null;
+
+  const mLastMarker = /^(.*\b(?:Fund|FOF)\b)(.*)$/i.exec(s);
+  if (mLastMarker) {
+    schemeNameSimple = mLastMarker[1]!.trim().replace(/^-+|-+$/g, "").trim() || null;
+    const tail = mLastMarker[2]!.trim().replace(/^-+|-+$/g, "").trim();
+    if (tail) infoParts.push(tail);
+  } else {
+    const firstDashIdx = s.indexOf(" - ");
+    if (firstDashIdx >= 0) {
+      schemeNameSimple = s.slice(0, firstDashIdx).trim().replace(/^-+|-+$/g, "").trim() || null;
+      const tail = s.slice(firstDashIdx + 3).trim().replace(/^-+|-+$/g, "").trim();
+      if (tail) infoParts.push(tail);
+    } else {
+      schemeNameSimple = s || null;
+    }
+  }
+
+  const schemeInfo = infoParts
+    .filter(Boolean)
+    .join(" | ")
+    .replace(/\b80\s+C\b/gi, "80C")
+    .replace(/^Direct Plan - Growth$/i, /^Bandhan\b/i.test(s) ? "Direct Plan-Growth" : "Direct Plan - Growth")
+    .replace(/\s{2,}/g, " ")
+    .trim() || null;
+  return { schemeNameSimple, schemeDematMode, schemeFormerName, schemeInfo };
+}
+
+/**
+ * Parse closing valuation line(s). Tries the strict single-line regex first, then whitespace-collapsed,
+ * then last occurrence of each fragment (handles broken line wraps & multi-scheme noise in one block).
+ */
+function parseClosingFields(block: string): {
+  closingUnits: string;
+  navDate: string;
+  nav: string;
+  costValue: string;
+  mvDate: string;
+  marketValue: string;
+} | null {
+  const fromM = (m: RegExpExecArray) => ({
+    closingUnits: m[1]!.replace(/,/g, ""),
+    navDate: m[2]!.trim(),
+    nav: m[3]!.replace(/,/g, ""),
+    costValue: m[4]!.replace(/,/g, ""),
+    mvDate: m[5]!.trim(),
+    marketValue: m[6]!.replace(/,/g, ""),
+  });
+
+  let m = CLOSING_RE.exec(block);
+  if (m) return fromM(m);
+  m = CLOSING_RE.exec(block.replace(/\s+/g, " "));
+  if (m) return fromM(m);
+
+  const cls = [...block.matchAll(/Closing\s+Unit\s+Balance:\s*([\d,]+(?:\.\d+)?)/gi)];
+  const navs = [...block.matchAll(/NAV\s+on\s*([^:]+):\s*INR\s*([\d,]+(?:\.\d+)?)/gi)];
+  const costs = [...block.matchAll(/Total\s+Cost\s+Value:\s*([\d,]+(?:\.\d+)?)/gi)];
+  const mvs = [...block.matchAll(/Market\s+Value\s+on\s*([^:]+):\s*INR\s*([\d,]+(?:\.\d+)?)/gi)];
+  if (!cls.length || !navs.length || !costs.length || !mvs.length) return null;
+
+  const c = cls[cls.length - 1]!;
+  const nv = navs[navs.length - 1]!;
+  const co = costs[costs.length - 1]!;
+  const mv = mvs[mvs.length - 1]!;
+
+  return {
+    closingUnits: c[1]!.replace(/,/g, ""),
+    navDate: nv[1]!.trim(),
+    nav: nv[2]!.replace(/,/g, ""),
+    costValue: co[1]!.replace(/,/g, ""),
+    mvDate: mv[1]!.trim(),
+    marketValue: mv[2]!.replace(/,/g, ""),
+  };
+}
+
+/**
+ * CAMS portfolio summary rows are usually AMC / entity labels; map them onto holdings when the
+ * PDF does not repeat “… Mutual Fund” above each Folio No line.
+ */
+function assignAmcFromPortfolioSummary(holdings: Holding[], rows: PortfolioSummaryRow[]): void {
+  const candidates = rows
+    .filter((r) => r.mutual_fund && r.mutual_fund !== "Total")
+    .map((r) => r.mutual_fund.trim())
+    .sort((a, b) => b.length - a.length);
+
+  if (!candidates.length) return;
+
+  for (const h of holdings) {
+    if (h.amc) continue;
+    const rawSn = (h.scheme_name || "").replace(/\s+/g, " ").trim();
+    if (!rawSn) continue;
+    const sn = rawSn.toLowerCase();
+
+    let best: string | null = null;
+    let bestScore = 0;
+
+    for (const mfRaw of candidates) {
+      const mf = mfRaw.toLowerCase();
+      if (mf.length < 4) continue;
+
+      let score = 0;
+      if (sn.includes(mf)) score = mf.length + 100;
+      else {
+        const words = mf.split(/\s+/).filter((w) => w.length > 2);
+        for (const w of words) {
+          if (sn.startsWith(w) || sn.includes(" " + w)) score = Math.max(score, w.length + (sn.startsWith(w) ? 10 : 0));
+        }
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = mfRaw;
+      }
+    }
+
+    if (best && bestScore >= 4) h.amc = best;
+  }
+}
+
+/** Last resort: scheme name prefix before “Fund”, “ETF”, “ - Direct”, etc. */
+function assignAmcFromSchemePrefix(holdings: Holding[]): void {
+  const stop = /(?=\s+-\s+|\s+Fund\s+|\s+ETF\s+|\s+FoF\s+|\s+Direct\s+|\s+Regular\s+)/i;
+
+  for (const h of holdings) {
+    if (h.amc || !h.scheme_name) continue;
+    const sn = h.scheme_name.trim();
+    const cut = sn.split(stop)[0]?.trim() ?? sn;
+    const words = cut.split(/\s+/).filter(Boolean);
+    if (words.length >= 2 && words.length <= 8) h.amc = words.join(" ");
+  }
+}
+
+const PAN_RE = /PAN:\s*([A-Z]{5}\d{4}[A-Z])/i;
+const FOLIO_CTRL_RE =
+  /Folio No:\s*(?<folio>.+?)\s+PAN:\s*(?<panId>[A-Z]{5}\d{4}[A-Z])\s+KYC:\s*(?<kyc>\S+)\s+PAN:\s*(?<panStat>\S+)/i;
+const ADVISOR_RE = /\(\s*Advisor\s*:?\s*([^)]+)\)/i;
+const ADVISOR_FALLBACK_RE = /\bAdvisor(?:\s*Code)?\s*:?\s*([A-Z0-9-]{4,})/i;
+const REGISTRAR_RE = /Registrar\s*:\s*(?:[^A-Za-z]+)?([A-Za-z]{3,})/i;
+
+const ADDRESS_DISCLAIMER_TAILS: RegExp[] = [
+  /\s+If you find any folios.*$/i,
+  /\s+is common to several members.*$/i,
+  /\s+registered your email.*$/i,
+  /\s+This statement may not.*$/i,
+];
+
+function casHeaderBeforePortfolio(text: string): string {
+  const m = /PORTFOLIO SUMMARY/i.exec(text);
+  return m?.index !== undefined ? text.slice(0, m.index) : text;
+}
+
+function stripDisclaimerTail(line: string): string {
+  let t = line.trim();
+  for (const r of ADDRESS_DISCLAIMER_TAILS) t = t.replace(r, "");
+  return t.trim();
+}
+
+function addressLineIsDisclaimer(s: string): boolean {
+  const t = s.toLowerCase();
+  const phrases = [
+    "investments.",
+    "the consolidation has been",
+    "entered by you",
+    "several members of your family",
+    "consolidate all those",
+    "if you find any folios",
+    "registered your email id",
+    "this statement may not",
+    "demat holdings",
+    "lists the transactions",
+    "balances and valuation of mutual fund",
+    "friendly initiative",
+    "mutual funds in which you are holding",
+    "have not entered a pan number",
+  ];
+  if (!phrases.some((p) => t.includes(p))) return false;
+  if (/\d{5,7}\b/.test(s)) return false;
+  return true;
+}
+
+function addressLineLooksPhysical(s: string): boolean {
+  if (/\d{5,7}\b/.test(s)) return true;
+  return /\b(india|uttar pradesh|pradesh|maharashtra|colony|road|block|mumbai|ghaziabad|near|no\.|h\.\s*no|season|factory|new shivpuri)\b/i.test(
+    s,
+  );
+}
+
+function extractInvestorName(text: string): string | null {
+  const collapsed = text.replace(/[ \t]+/g, " ").replace(/\s*\n\s*/g, " ");
+  const mCollapsed = /lists the transactions,\s*(.+?)\s+balances and valuation/i.exec(collapsed);
+  if (mCollapsed) {
+    const cand = mCollapsed[1].replace(/^[,.\s]+|[,.\s]+$/g, "").trim();
+    if (cand.length && cand.length < 200 && !cand.includes("@")) return cand;
+  }
+
+  const header = casHeaderBeforePortfolio(text);
+  const lines = header.split(/\r?\n/).map((ln) => ln.replace(/\s+/g, " ").trim());
+  for (let i = 0; i < lines.length; i++) {
+    const s = lines[i]!;
+    if (i + 1 < lines.length && /(you are holding|lists the transactions)\s*$/i.test(s)) {
+      const cand = lines[i + 1]!;
+      const wc = cand.split(/\s+/).filter(Boolean).length;
+      if (/^[A-Za-z][A-Za-z\s.'’-]{0,120}$/.test(cand) && wc >= 2 && wc <= 8) {
+        if (!cand.includes("@") && !cand.toLowerCase().includes("http")) return cand.trim();
+      }
+    }
+    const wc = s.split(/\s+/).filter(Boolean).length;
+    if (/^[A-Za-z][A-Za-z\s.'’-]{0,120}$/.test(s) && wc >= 2 && wc <= 8 && i > 0) {
+      if (/holding\s*$/i.test(lines[i - 1]!)) return s.trim();
+    }
+  }
+
+  const m = /(?<![A-Za-z])([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+)\s+balances and valuation/.exec(
+    text,
+  );
+  return m ? m[1].trim() : null;
+}
+
+function extractAddressFromHeader(header: string, investorName: string | null): string | null {
+  const lines = header.split(/\r?\n/).map((ln) => ln.replace(/\s+/g, " ").trim());
+  const nameNorm = (investorName ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+
+  let nameIdx: number | null = null;
+  if (nameNorm) {
+    const j = lines.findIndex((s) => s.toLowerCase() === nameNorm);
+    if (j >= 0) nameIdx = j;
+  }
+  if (nameIdx === null) {
+    for (let i = 0; i < lines.length; i++) {
+      const s = lines[i]!;
+      const wc = s.split(/\s+/).filter(Boolean).length;
+      if (/^[A-Za-z][A-Za-z\s.'’-]{0,120}$/.test(s) && wc >= 2 && wc <= 8 && i > 0) {
+        if (/holding\s*$/i.test(lines[i - 1]!)) {
+          nameIdx = i;
+          break;
+        }
+      }
+    }
+  }
+
+  const start = nameIdx !== null ? nameIdx + 1 : 0;
+  const parts: string[] = [];
+  for (const s of lines.slice(start)) {
+    if (/PORTFOLIO\s+SUMMARY/i.test(s)) break;
+    const frag = stripDisclaimerTail(s);
+    if (!frag || frag.length < 3) continue;
+    if (addressLineIsDisclaimer(frag)) continue;
+    if (!addressLineLooksPhysical(frag)) continue;
+    if (/SWSACSMAC|7101-eviL|noisreV:V/i.test(frag)) continue;
+    if (/^\d{2}-[A-Za-z]{3}-\d{4}\s+To\s+\d{2}-[A-Za-z]{3}-\d{4}/.test(frag)) continue;
+    if (frag.toLowerCase().startsWith("mobile:") || /^phone\s+(res|off):/i.test(frag)) continue;
+    parts.push(frag);
+  }
+
+  if (!parts.length) return null;
+  let merged = parts.join(", ").replace(/,(\S)/g, ", $1").replace(/\s+/g, " ").trim();
+  merged = merged.replace(/,\s*Mobile:\s*[^,]+$/i, "");
+  merged = merged.replace(/,\s*Phone\s+Res:\s*[^,]+(\s*,\s*Phone\s+Off:\s*[^,]+)?/i, "");
+  return merged || null;
+}
+
+function extractInvestorPanFromFirstFolio(text: string): string | null {
+  const m = /^Folio No:/m.exec(text);
+  if (!m || m.index === undefined) return null;
+  const tail = text.slice(m.index);
+  const p = /PAN:\s*((?:NOT OK|[A-Z]{5}\d{4}[A-Z]))/i.exec(tail);
+  return p ? p[1]!.trim() : null;
+}
+
+function parseFolioControlLine(folioLine: string): {
+  folioRaw: string;
+  panId: string | null;
+  kycStatus: string | null;
+  panStatus: string | null;
+} {
+  const kycPanOnly = /KYC:\s*(NOT\s+OK|OK)\s+PAN:\s*(NOT\s+OK|OK)/i.exec(folioLine);
+  const m = FOLIO_CTRL_RE.exec(folioLine);
+  if (m?.groups) {
+    return {
+      folioRaw: m.groups.folio!.trim(),
+      panId: m.groups.panId!.trim(),
+      kycStatus: m.groups.kyc!.trim(),
+      panStatus: m.groups.panStat!.trim(),
+    };
+  }
+  const fm = /Folio No:\s*(.+?)(?:\s+PAN:|\s+KYC:|\s*$)/i.exec(folioLine);
+  const folioRaw = fm ? fm[1]!.trim() : "";
+  const pm = /PAN:\s*([A-Z]{5}\d{4}[A-Z])/i.exec(folioLine);
+  const panId = pm ? pm[1]!.trim() : null;
+  const km = /KYC:\s*([A-Z]+(?:\s+[A-Z]+)?)/i.exec(folioLine);
+  const kycStatus = kycPanOnly ? kycPanOnly[1].replace(/\s+/g, " ").trim() : km ? km[1]!.trim() : null;
+  const p2 = [...folioLine.matchAll(/PAN:\s*/gi)];
+  let panStatus: string | null = null;
+  if (kycPanOnly) panStatus = kycPanOnly[2].replace(/\s+/g, " ").trim();
+  if (p2.length >= 2) {
+    const rest = folioLine.slice(p2[1]!.index! + p2[1]![0].length).trim();
+    panStatus = rest.split(/\s+/)[0] ?? null;
+  }
+  return { folioRaw, panId, kycStatus, panStatus };
+}
+
+function parseNomineeLine(line: string): [string | null, string | null, string | null] {
+  const m = /Nominee\s*1:\s*(.*)/i.exec(line);
+  if (!m) return [null, null, null];
+  const rest = m[1]!;
+  const parts = rest.split(/\s*Nominee\s*2:\s*/i);
+  const n1 = (parts[0] ?? "").trim();
+  if (parts.length < 2) return [n1 || null, null, null];
+  const parts3 = parts[1]!.split(/\s*Nominee\s*3:\s*/i);
+  const n2 = (parts3[0] ?? "").trim();
+  const n3 = (parts3[1] ?? "").trim();
+  return [n1 || null, n2 || null, n3 || null];
+}
+
+// ---------------------------------------------------------------------------
+// Period / contact
+// ---------------------------------------------------------------------------
+
+function extractPeriod(text: string): [string | null, string | null] {
+  const m = /(\d{2}-[A-Za-z]{3}-\d{4})\s+To\s+(\d{2}-[A-Za-z]{3}-\d{4})/.exec(text);
+  return m ? [m[1], m[2]] : [null, null];
+}
+
+const MONTHS: Record<string, number> = {
+  Jan: 0,
+  Feb: 1,
+  Mar: 2,
+  Apr: 3,
+  May: 4,
+  Jun: 5,
+  Jul: 6,
+  Aug: 7,
+  Sep: 8,
+  Oct: 9,
+  Nov: 10,
+  Dec: 11,
+};
+const MONTH_NAMES = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+] as const;
+
+function parseCASDate(s: string): Date | null {
+  const m = /^(\d{2})-([A-Za-z]{3})-(\d{4})$/.exec(s.trim());
+  if (!m) return null;
+  const mo = MONTHS[m[2]];
+  if (mo === undefined) return null;
+  return new Date(parseInt(m[3], 10), mo, parseInt(m[1], 10));
+}
+
+function fmtCASDate(d: Date): string {
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${dd}-${MONTH_NAMES[d.getMonth()]}-${d.getFullYear()}`;
+}
+
+function extractInvestorContact(text: string): [string | null, string | null, string | null, string | null] {
+  let email: string | null = null;
+  const mE = /Email Id:\s*(\S+@\S+)/i.exec(text);
+  if (mE) email = mE[1].trim();
+
+  let mobile: string | null = null;
+  const mM = /Mobile:\s*(\+?\d[\d\s-]{8,})/i.exec(text);
+  if (mM) mobile = mM[1].trim().replace(/\s+/g, "");
+
+  const name = extractInvestorName(text);
+  const header = casHeaderBeforePortfolio(text);
+  const address = extractAddressFromHeader(header, name);
+
+  return [name, email, mobile, address];
+}
+
+// ---------------------------------------------------------------------------
+// Portfolio summary  (use $ not Python \\Z)
+// ---------------------------------------------------------------------------
+
+function extractPortfolioSummary(text: string): PortfolioSummaryRow[] {
+  const m = /PORTFOLIO SUMMARY\s+([\s\S]*?)(?=Date\s+Transaction|$)/.exec(text);
+  if (!m) return [];
+  const block = m[1];
+  const rows: PortfolioSummaryRow[] = [];
+
+  for (const rawLine of block.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line === "Mutual Fund") continue;
+    if (line.startsWith("Total ")) {
+      const parts = line.split(/\s+/);
+      if (parts.length >= 3) {
+        rows.push({
+          mutual_fund: "Total",
+          cost_value_inr: parts[1].replace(/,/g, ""),
+          market_value_inr: parts[2].replace(/,/g, ""),
+        });
+      }
+      break;
+    }
+    const mm = /^(.+?)\s+([\d,]+(?:\.\d+)?)\s+([\d,]+(?:\.\d+)?)\s*$/.exec(line);
+    if (mm) {
+      rows.push({
+        mutual_fund: mm[1].trim(),
+        cost_value_inr: mm[2].replace(/,/g, ""),
+        market_value_inr: mm[3].replace(/,/g, ""),
+      });
+    }
+  }
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Folio blocks
+// ---------------------------------------------------------------------------
+
+function splitFolioBlocks(text: string): string[] {
+  const lines = text.split(/\r?\n/);
+  const starts: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim().startsWith("Folio No:")) starts.push(i);
+  }
+  if (!starts.length) return [];
+
+  const blocks: string[] = [];
+  for (let idx = 0; idx < starts.length; idx++) {
+    const start = starts[idx];
+    const end = idx + 1 < starts.length ? starts[idx + 1] : lines.length;
+    blocks.push(lines.slice(start, end).join("\n"));
+  }
+  return blocks;
+}
+
+/**
+ * CAMS PDF text sometimes wraps ISIN across lines as:
+ * `ISIN : INF Registrar : CAMS` + next line `179 KB 1 IB 7` — stitch so ISIN regex can read it.
+ */
+function repairBrokenIsinInSchemeMerged(merged: string): string {
+  return merged.replace(
+    /\bI\s*N\s*F\s+Registrar\s*:\s*(?:CAMS|KFINTECH|KARVY|COMPUTERSHARE)\s+/gi,
+    "INF ",
+  );
+}
+
+function parseHoldingBlock(
+  block: string,
+  amcFallback: string | null,
+  statementPeriodFrom: string | null
+): Holding | null {
+  const fm = /^Folio No:.*$/m.exec(block);
+  if (!fm || fm.index === undefined) return null;
+
+  let folioLine = fm[0].trim();
+  let restBlk = block.slice(fm.index + fm[0].length).replace(/^\n+/, "");
+  const restLines = restBlk.split(/\r?\n/);
+  let li = 0;
+  while (li < restLines.length && !restLines[li].trim()) li++;
+  if (
+    li < restLines.length &&
+    /^PAN:\s*/i.test(restLines[li].trim()) &&
+    !/PAN:\s*/i.test(folioLine)
+  ) {
+    folioLine = `${folioLine} ${restLines[li].trim()}`.replace(/\s+/g, " ").trim();
+    li++;
+  }
+  restBlk = restLines.slice(li).join("\n");
+
+  let { folioRaw, panId, kycStatus, panStatus } = parseFolioControlLine(folioLine);
+  if (!kycStatus || !panStatus) {
+    const kps = /KYC:\s*(NOT\s+OK|OK)\s+PAN:\s*(NOT\s+OK|OK)/i.exec(block);
+    if (kps) {
+      if (!kycStatus) kycStatus = kps[1].replace(/\s+/g, " ").trim();
+      if (!panStatus) panStatus = kps[2].replace(/\s+/g, " ").trim();
+    }
+  }
+  let pan = panId;
+  if (!pan) {
+    const pm2 = PAN_RE.exec(block);
+    if (pm2) pan = pm2[1].trim();
+  }
+
+  let amc: string | null = amcFallback;
+  const pre = block.slice(0, fm.index);
+  for (const ln of [...pre.split(/\r?\n/)].reverse()) {
+    const s = ln.trim();
+    if (s.endsWith("Mutual Fund") && !s.includes("friendly initiative")) {
+      amc = s;
+      break;
+    }
+  }
+
+  const linesAfter = restBlk.split(/\r?\n/);
+  let holderName: string | null = null;
+  const schemeChunks: string[] = [];
+  let idx = 0;
+  let nominee1: string | null = null;
+  let nominee2: string | null = null;
+  let nominee3: string | null = null;
+
+  while (idx < linesAfter.length) {
+    const s = linesAfter[idx].trim();
+    if (!s) {
+      idx++;
+      continue;
+    }
+    if (s.startsWith("Nominee")) {
+      [nominee1, nominee2, nominee3] = parseNomineeLine(s);
+      idx++;
+      break;
+    }
+    if (s.startsWith("Opening")) break;
+    if (holderName === null) {
+      if (
+        /^[A-Z]{5}\d{4}[A-Z]/.test(s) ||
+        /^KYC:\s*.+?\s+PAN:\s*.+$/i.test(s) ||
+        (/^PAN:/i.test(s) && s.includes("PAN: OK"))
+      ) {
+        idx++;
+        continue;
+      }
+      holderName = s.replace(/\s+/g, " ").trim();
+      idx++;
+      continue;
+    }
+    schemeChunks.push(s);
+    idx++;
+  }
+
+  const schemeLine = schemeChunks.length ? schemeChunks.join(" ") : null;
+
+  let schemeCode: string | null = null;
+  let schemeName: string | null = null;
+  let schemeNameSimple: string | null = null;
+  let schemeDematMode: string | null = null;
+  let schemeFormerName: string | null = null;
+  let schemeInfo: string | null = null;
+  let isin: string | null = null;
+  let advisor: string | null = null;
+  let registrar: string | null = null;
+
+  if (schemeLine) {
+    const merged = repairBrokenIsinInSchemeMerged(schemeLine.replace(/\s+/g, " ").trim());
+    const imAny = /\bI\s*N\s*F(?:\s*[A-Z0-9]){9}\b/.exec(merged);
+    if (imAny) isin = imAny[0].replace(/\s+/g, "");
+
+    const am = ADVISOR_RE.exec(merged);
+    if (am) advisor = cleanAdvisorValue(am[1].trim());
+    if (!advisor) {
+      const af = ADVISOR_FALLBACK_RE.exec(merged);
+      if (af) advisor = cleanAdvisorValue(af[1].trim());
+    }
+
+    const rm = REGISTRAR_RE.exec(merged);
+    if (rm) registrar = rm[1].trim();
+    const regTail = /Registrar\s*:?\s*([\s\S]*)/i.exec(merged)?.[1] ?? "";
+    const knownRegistrar =
+      /\b(KFINTECH|CAMS|KARVY|COMPUTERSHARE)\b/i.exec(regTail) ??
+      /\b(KFINTECH|CAMS|KARVY|COMPUTERSHARE)\b/i.exec(merged);
+    if (knownRegistrar) registrar = knownRegistrar[1].toUpperCase();
+
+    const isinTag = /\bISIN\s*:/i.exec(merged);
+    let beforeIsin = isinTag?.index != null ? merged.slice(0, isinTag.index).trim() : merged;
+    if (!isinTag) {
+      beforeIsin = beforeIsin.replace(/\bISIN\b.*$/i, "").trim();
+    }
+    if (isin && beforeIsin.replace(/\s+$/, "").endsWith(isin)) {
+      beforeIsin = beforeIsin
+        .slice(0, -isin.length)
+        .trim()
+        .replace(/\($/, "")
+        .trim();
+    }
+    const preCode = beforeIsin
+      .replace(/^\s*#\s*/i, "")
+      .replace(/^\s*Registrar\s*:\s*(?:CAMS\s+)?/i, "")
+      .trim();
+    const codeM = /^([A-Z0-9 ]+)-(.+)$/.exec(preCode);
+    if (codeM) {
+      let codeRaw = codeM[1].replace(/\s+/g, "").trim();
+      const alphaPrefix = /^([A-Z]+)(\d[A-Z0-9]+)$/i.exec(codeRaw);
+      if (alphaPrefix && alphaPrefix[1].length >= 4) {
+        codeRaw = alphaPrefix[2].toUpperCase();
+      }
+      if (codeRaw.length > 12) {
+        const suffix = /([A-Z]{0,4}\d[A-Z0-9]{2,11})$/i.exec(codeRaw);
+        if (suffix) codeRaw = suffix[1].toUpperCase();
+      }
+      schemeCode = codeRaw;
+      schemeName = codeM[2].trim().replace(/-+$/, "").trim();
+    } else {
+      schemeName = preCode;
+    }
+    if (schemeName) {
+      schemeName = normalizeSchemeName(schemeName);
+      const parts = extractSchemeComponents(schemeName);
+      schemeNameSimple = parts.schemeNameSimple;
+      schemeDematMode = parts.schemeDematMode;
+      schemeFormerName = parts.schemeFormerName;
+      schemeInfo = parts.schemeInfo;
+    }
+  }
+
+  const openM = /Opening Unit Balance:\s*([\d,]+(?:\.\d+)?)/.exec(block);
+  const closing = parseClosingFields(block);
+  const openingUnits = openM ? openM[1].replace(/,/g, "") : null;
+
+  let closingUnits: string | null = null;
+  let navDate: string | null = null;
+  let nav: string | null = null;
+  let costValue: string | null = null;
+  let mvDate: string | null = null;
+  let marketValue: string | null = null;
+
+  if (closing) {
+    closingUnits = closing.closingUnits;
+    navDate = closing.navDate;
+    nav = closing.nav;
+    costValue = closing.costValue;
+    mvDate = closing.mvDate;
+    marketValue = closing.marketValue;
+  }
+
+  const transactions = parseTransactions(block);
+
+  let openingUnitsDec = new Decimal(0);
+  let costValueDec = new Decimal(0);
+  try {
+    if (openingUnits) openingUnitsDec = parseMoney(openingUnits);
+    if (costValue) costValueDec = parseMoney(costValue);
+  } catch {
+    openingUnitsDec = new Decimal(0);
+    costValueDec = new Decimal(0);
+  }
+
+  if (openingUnitsDec.gt(0) && costValueDec.gte(0)) {
+    /**
+     * Opening balance on the CAS applies from the **start of the consolidated period** (`period_from`),
+     * so the synthetic anchor is dated on that day (not the day before the first in-window transaction).
+     * Fallback: legacy “day before first txn” only when `period_from` is missing from the parse.
+     */
+    const periodStart = parseCASDate(statementPeriodFrom ?? "");
+    let anchorDateStr: string | null = null;
+    if (periodStart) {
+      anchorDateStr = fmtCASDate(periodStart);
+    } else {
+      let firstTxDt: Date | null = null;
+      if (transactions.length) {
+        const txDates = transactions.map((tx) => parseCASDate(tx.date)).filter((d): d is Date => d !== null);
+        if (txDates.length) firstTxDt = txDates.reduce((a, b) => (a < b ? a : b));
+      }
+      if (firstTxDt) {
+        const anchorDate = new Date(firstTxDt);
+        anchorDate.setDate(anchorDate.getDate() - 1);
+        anchorDateStr = fmtCASDate(anchorDate);
+      }
+    }
+
+    if (anchorDateStr) {
+      const avgPrice = openingUnitsDec.isZero()
+        ? new Decimal(0)
+        : costValueDec.div(openingUnitsDec).toDecimalPlaces(4);
+
+      const openingAnchor: Transaction = {
+        date: anchorDateStr,
+        description: "Synthetic opening anchor (avg cost)",
+        amount_inr: costValue ? fmtCasMoneyField(costValue) : costValueDec.toString(),
+        units: openingUnits ? fmtCasMoneyField(openingUnits) : openingUnitsDec.toString(),
+        price_inr: avgPrice.toFixed(4),
+        unit_balance: openingUnits ? fmtCasMoneyField(openingUnits) : openingUnitsDec.toString(),
+        is_synthetic: "true",
+      };
+
+      const alreadyPresent =
+        transactions.length > 0 &&
+        transactions[0].date === openingAnchor.date &&
+        transactions[0].description === openingAnchor.description;
+
+      if (!alreadyPresent) transactions.unshift(openingAnchor);
+    }
+  }
+
+  return {
+    amc,
+    folio_no: folioRaw,
+    pan,
+    kyc_status: kycStatus,
+    pan_status: panStatus,
+    nominee_1: nominee1,
+    nominee_2: nominee2,
+    nominee_3: nominee3,
+    investor_name_on_folio: holderName,
+    scheme_code: schemeCode,
+    scheme_name: schemeName,
+    scheme_name_simple: schemeNameSimple,
+    scheme_demat_mode: schemeDematMode,
+    scheme_former_name: schemeFormerName,
+    scheme_info: schemeInfo,
+    isin,
+    advisor,
+    registrar,
+    opening_units: openingUnits,
+    closing_units: closingUnits,
+    nav_date: navDate,
+    nav_inr: nav,
+    cost_value_inr: costValue,
+    market_value_date: mvDate,
+    market_value_inr: marketValue,
+    transactions,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// PDF line extraction (Expo bridge)
+// ---------------------------------------------------------------------------
+
+export function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunk = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+export function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binaryStr = atob(base64);
+  const len = binaryStr.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = binaryStr.charCodeAt(i);
+  return bytes.buffer;
+}
+
+async function extractLinesViaBridge(buffer: ArrayBuffer, password?: string): Promise<string[]> {
+  const { isPdfTextExtractorRegistered, extractTextFromPdfBase64 } = await import("./pdfTextBridge");
+  if (!isPdfTextExtractorRegistered()) {
+    throw new Error(
+      "PDF text extractor not registered. In Expo, mount PdfTextExtractor and call registerPdfTextExtractor (see App.tsx). On Node, use parseCASBufferNode from parser/cas-parser.node.ts."
+    );
+  }
+  const text = await extractTextFromPdfBase64(arrayBufferToBase64(buffer), password);
+  return text.split(/\r?\n/);
+}
+
+// ---------------------------------------------------------------------------
+// Public parse API
+// ---------------------------------------------------------------------------
+
+export function parseCASFromExtractedLines(fullLines: string[], fileName: string): ParsedCAS {
+  const rawText = fullLines.join("\n");
+  const [periodFrom, periodTo] = extractPeriod(rawText);
+  const cleaned = stripBoiler([...fullLines]);
+  const text = cleaned.join("\n");
+  const [investorName, email, mobile, address] = extractInvestorContact(text);
+  const investorPan = extractInvestorPanFromFirstFolio(text);
+  const portfolioSummary = extractPortfolioSummary(text);
+  const blocks = splitFolioBlocks(text);
+  let lastAMC: string | null = null;
+  const holdings: Holding[] = [];
+
+  for (const b of blocks) {
+    const h = parseHoldingBlock(b, lastAMC, periodFrom);
+    if (!h) continue;
+    if (h.amc) lastAMC = h.amc;
+    holdings.push(h);
+  }
+
+  // Keep parser output parity with Python reference: do not synthesize AMC values post-parse.
+
+  for (const h of holdings) {
+    h.units_reconciliation = verifyHoldingUnitReconciliation(h);
+  }
+  const failed = holdings.filter((h) => !h.units_reconciliation?.ok).length;
+
+  return {
+    source_file: fileName,
+    period_from: periodFrom,
+    period_to: periodTo,
+    investor_name: investorName,
+    email,
+    mobile,
+    address,
+    investor_pan: investorPan,
+    portfolio_summary: portfolioSummary,
+    holdings,
+    units_verification: {
+      all_holdings_ok: failed === 0,
+      failed_folio_count: failed,
+      holdings_checked: holdings.length,
+    },
+  };
+}
+
+export async function parseCASBuffer(buffer: ArrayBuffer, fileName = "cas.pdf", password?: string): Promise<ParsedCAS> {
+  const lines = await extractLinesViaBridge(buffer, password);
+  return parseCASFromExtractedLines(lines, fileName);
+}
+
+export async function parseCASBase64(
+  base64Pdf: string,
+  fileName = "cas.pdf",
+  password?: string
+): Promise<ParsedCAS> {
+  return parseCASBuffer(base64ToArrayBuffer(base64Pdf), fileName, password);
+}
+
+export function parseCASText(fullText: string, fileName = "cas.pdf"): ParsedCAS {
+  return parseCASFromExtractedLines(fullText.split(/\r?\n/), fileName);
+}
+
+// --- Legacy alias used by older UI imports ---
+export const parseCasFromPdfText = parseCASText;
+
+// ---------------------------------------------------------------------------
+// ISIN enrichment
+// ---------------------------------------------------------------------------
+
+export interface MFDataItem {
+  amfi_code?: string | number;
+  name?: string;
+  plan_type?: string;
+  nav?: string | number;
+  expense_ratio?: string | number;
+  aum?: string | number;
+  category?: string;
+  family_id?: string | number;
+  amc_name?: string;
+}
+
+function pickMFDataFields(item: MFDataItem): Partial<Holding> {
+  return {
+    mf_amfi_code: String(item.amfi_code ?? ""),
+    mf_name: item.name ?? "",
+    mf_plan_type: item.plan_type ?? "",
+    mf_nav: String(item.nav ?? ""),
+    mf_expense_ratio: String(item.expense_ratio ?? ""),
+    mf_aum: String(item.aum ?? ""),
+    mf_category: item.category ?? "",
+    mf_family_id: String(item.family_id ?? ""),
+    mf_amc_name: item.amc_name ?? "",
+  };
+}
+
+async function fetchMFDataByISIN(isin: string, timeoutMs = 8000): Promise<MFDataItem | null> {
+  const url = MFDATA_SEARCH_URL + encodeURIComponent(isin);
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const resp = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (CAS-Parser-TS/1.0)",
+        Accept: "application/json",
+      },
+    });
+    clearTimeout(timer);
+    if (!resp.ok) return null;
+    const payload = (await resp.json()) as { status?: string; data?: MFDataItem[] };
+    if (payload?.status !== "success") return null;
+    const data = payload?.data ?? [];
+    return data.length ? data[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function enrichHoldingsWithMFData(
+  parsed: ParsedCAS,
+  options: { cache?: Map<string, MFDataItem | null>; refresh?: boolean } = {}
+): Promise<void> {
+  const { cache = new Map(), refresh = false } = options;
+
+  for (const h of parsed.holdings) {
+    const isin = (h.isin ?? "").trim().toUpperCase();
+    if (!isin) continue;
+
+    let item: MFDataItem | null | undefined = cache.get(isin);
+    if (item === undefined || refresh) {
+      item = await fetchMFDataByISIN(isin);
+      cache.set(isin, item ?? null);
+    }
+    if (item) Object.assign(h, pickMFDataFields(item));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CSV
+// ---------------------------------------------------------------------------
+
+const META_KEYS = [
+  "source_file",
+  "period_from",
+  "period_to",
+  "investor_name",
+  "email",
+  "mobile",
+  "address",
+  "investor_pan",
+] as const;
+
+function metaRow(parsed: ParsedCAS): Record<string, string> {
+  return Object.fromEntries(META_KEYS.map((k) => [k, parsed[k] ?? ""]));
+}
+
+function toCsvRow(obj: Record<string, string>, cols: readonly string[]): string {
+  return cols
+    .map((c) => {
+      const v = String(obj[c] ?? "");
+      if (v.includes(",") || v.includes('"') || v.includes("\n"))
+        return `"${v.replace(/"/g, '""')}"`;
+      return v;
+    })
+    .join(",");
+}
+
+export interface CASCsvOutput {
+  portfolio_summary: string;
+  holdings: string;
+  transactions: string;
+}
+
+const HOLDING_CSV_FIELDS = [
+  ...META_KEYS,
+  "holding_index",
+  "amc",
+  "folio_no",
+  "pan",
+  "kyc_status",
+  "pan_status",
+  "nominee_1",
+  "nominee_2",
+  "nominee_3",
+  "investor_name_on_folio",
+  "scheme_code",
+  "scheme_name",
+  "scheme_name_simple",
+  "scheme_demat_mode",
+  "scheme_former_name",
+  "scheme_info",
+  "isin",
+  "advisor",
+  "registrar",
+  "opening_units",
+  "closing_units",
+  "nav_date",
+  "nav_inr",
+  "cost_value_inr",
+  "market_value_date",
+  "market_value_inr",
+  "mf_amfi_code",
+  "mf_name",
+  "mf_plan_type",
+  "mf_nav",
+  "mf_expense_ratio",
+  "mf_aum",
+  "mf_category",
+  "mf_family_id",
+  "mf_amc_name",
+] as const;
+
+export function buildCASCsv(parsed: ParsedCAS): CASCsvOutput {
+  const meta = metaRow(parsed);
+
+  const psumCols = [...META_KEYS, "mutual_fund", "cost_value_inr", "market_value_inr"] as const;
+  const psumLines = [psumCols.join(",")];
+  for (const row of parsed.portfolio_summary) {
+    const line: Record<string, string> = { ...meta };
+    line.mutual_fund = row.mutual_fund;
+    line.cost_value_inr = row.cost_value_inr;
+    line.market_value_inr = row.market_value_inr;
+    psumLines.push(toCsvRow(line, psumCols));
+  }
+
+  const holdLines = [HOLDING_CSV_FIELDS.join(",")];
+  const metaKeySet = new Set<string>(META_KEYS as unknown as string[]);
+  parsed.holdings.forEach((h, i) => {
+    const row: Record<string, string> = {};
+    for (const col of HOLDING_CSV_FIELDS) {
+      if (col === "holding_index") row[col] = String(i);
+      else if (metaKeySet.has(col)) row[col] = meta[col as keyof typeof meta] ?? "";
+      else {
+        const v = h[col as keyof Holding];
+        if (v == null || typeof v === "object") row[col] = "";
+        else row[col] = String(v);
+      }
+    }
+    holdLines.push(toCsvRow(row, HOLDING_CSV_FIELDS));
+  });
+
+  const txCols = [
+    ...META_KEYS,
+    "holding_index",
+    "folio_no",
+    "scheme_code",
+    "scheme_name",
+    "isin",
+    "amc",
+    "date",
+    "description",
+    "amount_inr",
+    "units",
+    "price_inr",
+    "unit_balance",
+    "is_synthetic",
+  ] as const;
+
+  const txLines = [txCols.join(",")];
+  parsed.holdings.forEach((h, i) => {
+    const link: Record<string, string> = {
+      folio_no: h.folio_no ?? "",
+      scheme_code: h.scheme_code ?? "",
+      scheme_name: h.scheme_name ?? "",
+      isin: h.isin ?? "",
+      amc: h.amc ?? "",
+    };
+    for (const tx of h.transactions) {
+      const line: Record<string, string> = { ...meta };
+      line.holding_index = String(i);
+      line.folio_no = link.folio_no;
+      line.scheme_code = link.scheme_code;
+      line.scheme_name = link.scheme_name;
+      line.isin = link.isin;
+      line.amc = link.amc;
+      line.date = tx.date;
+      line.description = tx.description;
+      line.amount_inr = tx.amount_inr;
+      line.units = tx.units;
+      line.price_inr = tx.price_inr;
+      line.unit_balance = tx.unit_balance;
+      line.is_synthetic = tx.is_synthetic ?? "";
+      txLines.push(toCsvRow(line, txCols));
+    }
+  });
+
+  return {
+    portfolio_summary: psumLines.join("\n"),
+    holdings: holdLines.join("\n"),
+    transactions: txLines.join("\n"),
+  };
+}
+
+/** Legacy alias for CSV bundle shape */
+export type CASCsvBundle = CASCsvOutput;

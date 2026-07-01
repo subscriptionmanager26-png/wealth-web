@@ -1,0 +1,40 @@
+name: Refresh screener snapshot
+
+on:
+  schedule:
+    # 3rd of each month at 03:00 UTC
+    - cron: "0 3 3 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Fetch AMFI active schemes
+        run: npm run fetch-amfi-active-schemes
+
+      - name: Fetch Upvaly screener snapshot
+        run: npm run fetch-screener-snapshot
+
+      - name: Commit snapshot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add assets/screener-snapshot.json public/screener-snapshot.json assets/screener-snapshot-meta.json public/screener-snapshot-meta.json
+          if git diff --staged --quiet; then
+            echo "No snapshot changes"
+            exit 0
+          fi
+          git commit -m "chore(screener): refresh monthly Upvaly snapshot"
+          git push

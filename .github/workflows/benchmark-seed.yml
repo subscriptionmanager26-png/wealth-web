@@ -1,0 +1,37 @@
+name: Refresh benchmark seed
+
+on:
+  schedule:
+    # Daily at 04:00 UTC (after Indian market close + Nifty TRI publish)
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Fetch Nifty TRI benchmark seed
+        run: npm run fetch-benchmark-seed
+
+      - name: Commit benchmark seed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add assets/benchmark-seed.json public/benchmark-seed.json assets/benchmark-seed-meta.json public/benchmark-seed-meta.json
+          if git diff --staged --quiet; then
+            echo "No benchmark seed changes"
+            exit 0
+          fi
+          git commit -m "chore(benchmark): refresh daily Nifty TRI seed"
+          git push

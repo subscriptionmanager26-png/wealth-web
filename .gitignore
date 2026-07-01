@@ -1,0 +1,8 @@
+node_modules/
+dist/
+public/benchmark-seed.json
+public/unique_schemes.csv
+.DS_Store
+.vercel
+.env
+.env.local

@@ -1,0 +1,40 @@
+---
+description: Bottom-nav tab panels and AI chat persistence — avoid layout regressions
+globs: src/App.tsx,src/components/PortfolioChatTab.tsx,src/components/Layout.tsx,src/hooks/useMunshiChat.ts,src/index.css
+alwaysApply: false
+---
+
+# wealth-web tab panels
+
+## One visible main panel per bottom tab
+
+Render tab content **only** when that tab is active (`bottomTab === "ai"` → AI, etc.).
+
+Do **not** mount AI (or any tab) on every route and try to hide it.
+
+## Never use `hidden` on `.portfolio-chat`
+
+`.portfolio-chat` sets `display: flex` in CSS, which overrides the HTML `hidden` attribute. The AI panel will stay visible on every tab.
+
+```css
+/* ❌ BAD — hidden attribute is ignored */
+.portfolio-chat { display: flex; }
+
+/* ✅ GOOD — if you must keep mounted, use a modifier class */
+.portfolio-chat--inactive { display: none !important; }
+```
+
+Prefer **conditional render** or **lift state to App** (see `useMunshiChat`) instead of always-mounted hidden panels.
+
+## Persisting AI state across tab switches
+
+- Lift API key + chat session state to `App.tsx` via `useMunshiChat` (survives `PortfolioChatTab` unmount).
+- Also persist to `deviceStorage` / `chatHistory` for page refresh.
+- Munshi Ji uses **tool calling** — see `server/munshi-tools.md` and `server/munshiToolSchemas.mjs`. Do not dump full portfolio context on every turn.
+- Do not equate “persist” with “always mount the AI UI”.
+
+## Before shipping tab or AI changes
+
+1. Click **Home**, **Screener**, **AI**, **Profile** — each must show only its own content.
+2. Chat + API key survive switching away from AI and back.
+3. Hard refresh — chat history and key restore from storage.
