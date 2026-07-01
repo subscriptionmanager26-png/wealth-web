@@ -2531,6 +2531,17 @@ input {
   }
 }
 
+.error-boundary {
+  margin: 16px;
+}
+
+.error-boundary-detail {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8125rem;
+  color: var(--negative);
+  word-break: break-word;
+}
+
 .portfolio-chat {
   max-width: 768px;
   margin: 0 auto;

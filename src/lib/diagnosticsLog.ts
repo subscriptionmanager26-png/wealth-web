@@ -3,6 +3,8 @@
  * Survives page refresh (localStorage ring buffer). No CAS PII — scheme codes and URLs only.
  */
 
+import { safeLocalStorageRemove, safeLocalStorageSet } from "./safeLocalStorage";
+
 export type DiagnosticsCategory =
   | "session"
   | "mapping"
@@ -15,10 +17,8 @@ export type DiagnosticsCategory =
 
 const STORAGE_KEY = "wealth_web_diag_log_v1";
 const SESSION_KEY = "wealth_web_diag_session_v1";
-const MAX_LINES = 10_000;
-const MAX_PERSIST_CHARS = 800_000;
-
-type Listener = () => void;
+const MAX_LINES = 4_000;
+const MAX_PERSIST_CHARS = 120_000;
 
 function formatTs(d = new Date()): string {
   const p = (n: number, len = 2) => String(n).padStart(len, "0");
@@ -37,15 +37,14 @@ function loadPersistedLines(): string[] {
 }
 
 function persistLines(lines: string[]): void {
-  try {
-    let blob = JSON.stringify(lines);
-    while (blob.length > MAX_PERSIST_CHARS && lines.length > 100) {
-      lines = lines.slice(Math.floor(lines.length * 0.1));
-      blob = JSON.stringify(lines);
-    }
-    localStorage.setItem(STORAGE_KEY, blob);
-  } catch {
-    /* quota */
+  let blob = JSON.stringify(lines);
+  while (blob.length > MAX_PERSIST_CHARS && lines.length > 100) {
+    lines = lines.slice(Math.floor(lines.length * 0.1));
+    blob = JSON.stringify(lines);
+  }
+  if (!safeLocalStorageSet(STORAGE_KEY, blob)) {
+    lines = lines.slice(-500);
+    safeLocalStorageSet(STORAGE_KEY, JSON.stringify(lines));
   }
 }
 
@@ -80,11 +79,7 @@ export function getDiagnosticsText(): string {
 
 export function clearDiagnostics(): void {
   lines = [];
-  try {
-    localStorage.removeItem(STORAGE_KEY);
-  } catch {
-    /* ignore */
-  }
+  safeLocalStorageRemove(STORAGE_KEY);
   notify();
 }
 

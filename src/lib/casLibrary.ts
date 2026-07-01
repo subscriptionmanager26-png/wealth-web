@@ -1,5 +1,6 @@
 import type { ParsedCas } from "@mobile/utils/casParser";
 import { diagLog } from "./diagnosticsLog";
+import { safeLocalStorageSet } from "./safeLocalStorage";
 
 export type SavedParsedCasFile = {
   id: string;
@@ -45,8 +46,8 @@ function loadIndex(): SavedParsedCasFile[] {
   }
 }
 
-function saveIndex(rows: SavedParsedCasFile[]): void {
-  localStorage.setItem(INDEX_KEY, JSON.stringify(rows));
+function saveIndex(rows: SavedParsedCasFile[]): boolean {
+  return safeLocalStorageSet(INDEX_KEY, JSON.stringify(rows));
 }
 
 export async function listCasIndex(): Promise<SavedParsedCasFile[]> {

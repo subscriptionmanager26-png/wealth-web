@@ -17,9 +17,13 @@ export function CasUploadModal({ open, busy, status, onClose, onUpload }: CasUpl
 
   const handleFile = async (file: File | undefined) => {
     if (!file || busy) return;
-    await onUpload(file, password.trim() || undefined);
-    setPassword("");
-    onClose();
+    try {
+      await onUpload(file, password.trim() || undefined);
+      setPassword("");
+      onClose();
+    } catch {
+      /* error toast handled by upload hook */
+    }
   };
 
   return (

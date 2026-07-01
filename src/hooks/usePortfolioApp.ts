@@ -126,8 +126,14 @@ export function usePortfolioApp() {
   const amfiAllBusyRef = useRef(appSession.amfiAllBusy);
 
   useEffect(() => {
+    let timer: number | null = null;
     return subscribeDiagnostics(() => {
-      setAmfiMappingLog(getDiagnosticsText());
+      if (timer != null) return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        const text = getDiagnosticsText();
+        setAmfiMappingLog(text.length > 50_000 ? text.slice(-50_000) : text);
+      }, 200);
     });
   }, []);
 
@@ -737,20 +743,24 @@ export function usePortfolioApp() {
   );
 
   const sellFundsCount = useMemo(() => {
-    const { sellFunds } = buildFundSellInsights(
-      insightsEligibleHoldings.map((h) => ({
-        id: h.id,
-        name: h.name,
-        category: h.category,
-        subCategory: h.category,
-        returnPct: h.returnPct,
-        amount: h.amount,
-        amfiCode: h.amfiCode,
-      })),
-      upvalySchemes,
-      benchmarkMonthEnds.nifty500 ?? [],
-    );
-    return sellFunds.length;
+    try {
+      const { sellFunds } = buildFundSellInsights(
+        insightsEligibleHoldings.map((h) => ({
+          id: h.id,
+          name: h.name,
+          category: h.category,
+          subCategory: h.category,
+          returnPct: h.returnPct,
+          amount: h.amount,
+          amfiCode: h.amfiCode,
+        })),
+        upvalySchemes,
+        benchmarkMonthEnds.nifty500 ?? [],
+      );
+      return sellFunds.length;
+    } catch {
+      return 0;
+    }
   }, [benchmarkMonthEnds, insightsEligibleHoldings, upvalySchemes]);
 
   const overviewSharpe = useMemo(() => {

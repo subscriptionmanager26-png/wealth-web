@@ -1,4 +1,5 @@
 import type { ParsedCas } from "@mobile/utils/casParser";
+import { safeLocalStorageSet } from "./safeLocalStorage";
 import { pendingResolvableAmfiCount, totalPendingResolvableAmfiAcrossDocs } from "../bridge/amfiSchemeMap.web";
 import type { SavedParsedCasFile } from "../lib/casLibrary";
 
@@ -36,8 +37,8 @@ export function loadPipelineMilestones(): CasPipelineMilestones {
   }
 }
 
-export function savePipelineMilestones(m: CasPipelineMilestones): void {
-  localStorage.setItem(STORE_PIPELINE_MILESTONES, JSON.stringify(m));
+export function savePipelineMilestones(m: CasPipelineMilestones): boolean {
+  return safeLocalStorageSet(STORE_PIPELINE_MILESTONES, JSON.stringify(m));
 }
 
 function formatIsoDateTime(iso: string | null | undefined): string {

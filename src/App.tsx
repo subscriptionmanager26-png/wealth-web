@@ -4,6 +4,7 @@ import { AccountDetailsTab } from "./components/AccountDetailsTab";
 import { AccountTab } from "./components/AccountTab";
 import { AnalysisTab } from "./components/AnalysisTab";
 import { CasUploadModal } from "./components/CasUploadModal";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { EmptyState, Layout, type AccountSubTabId } from "./components/Layout";
 import { FundsTab } from "./components/FundsTab";
 import { InsightsTab } from "./components/InsightsTab";
@@ -175,6 +176,12 @@ export default function App() {
         insightsLoading={app.upvalyInsightsLoading}
       />
     );
+  } else {
+    content = (
+      <div className="loading-row center">
+        <span className="spinner" /> Loading…
+      </div>
+    );
   }
 
   return (
@@ -194,7 +201,7 @@ export default function App() {
         onAiNewChatClick={() => setAiNewChatSeq((n) => n + 1)}
         aiNewChatDisabled={aiChatBusy}
       >
-        {content}
+        <ErrorBoundary>{content}</ErrorBoundary>
       </Layout>
 
       {showPortfolioPicker ? (

@@ -238,7 +238,12 @@ export async function fetchUpvalySchemeByCode(schemeCode: string): Promise<Upval
   if (!/^\d+$/.test(id)) return null;
   if (schemeCache.has(id)) {
     const cached = schemeCache.get(id);
-    if (cached && (!("riskStdDevByTimeframe" in cached) || !("expenseRatio" in cached))) {
+    if (
+      cached &&
+      (!("riskStdDevByTimeframe" in cached) ||
+        !("expenseRatio" in cached) ||
+        !cached.returnsByTimeframe)
+    ) {
       schemeCache.delete(id);
     } else {
       return cached ?? null;
