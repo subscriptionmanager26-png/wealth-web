@@ -9,6 +9,7 @@ export type AgentStep = {
   label: string;
   detail?: string;
   toolName?: string;
+  toolArgs?: Record<string, unknown>;
   startedAt?: number;
   endedAt?: number;
 };

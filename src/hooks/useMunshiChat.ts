@@ -16,7 +16,8 @@ import {
   loadMistralApiKey,
   saveMistralApiKeyPersisted,
 } from "../lib/mistralApiKey";
-import { runPortfolioChatAgent } from "../lib/portfolioChatAgent";
+import { runPortfolioChatAgent, ChatAbortError } from "../lib/portfolioChatAgent";
+import { completeRunningSteps } from "../lib/agentSteps";
 import type { PortfolioSnapshot } from "../lib/portfolioTools";
 import type { ChatMessage } from "../lib/portfolioChat";
 
@@ -50,6 +51,7 @@ export function useMunshiChat() {
   const isDraftRef = useRef(bootRef.current.isDraft);
   const sessionRef = useRef(session);
   const messagesRef = useRef(messages);
+  const abortRef = useRef<AbortController | null>(null);
 
   sessionRef.current = session;
   messagesRef.current = messages;
@@ -137,8 +139,17 @@ export function useMunshiChat() {
     [busy, refreshSessions],
   );
 
-  const send = useCallback(
-    async (question: string, snapshot: PortfolioSnapshot, onNeedApiKey?: () => void) => {
+  const stopGeneration = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
+
+  const runQuestion = useCallback(
+    async (
+      question: string,
+      history: ChatMessage[],
+      snapshot: PortfolioSnapshot,
+      onNeedApiKey?: () => void,
+    ) => {
       const q = question.trim();
       if (!q || busy) return;
       if (!apiKey.trim()) {
@@ -149,7 +160,6 @@ export function useMunshiChat() {
       setError(null);
       setBusy(true);
 
-      const history = messagesRef.current;
       const userMsg: ChatMessage = { id: newId(), role: "user", content: q };
       const assistantId = newId();
       const withUser = [...history, userMsg];
@@ -163,9 +173,12 @@ export function useMunshiChat() {
       setStreamingId(assistantId);
       setInput("");
 
+      const controller = new AbortController();
+      abortRef.current = controller;
+
       try {
         await runPortfolioChatAgent(
-          { question: q, history, apiKey, snapshot },
+          { question: q, history, apiKey, snapshot, signal: controller.signal },
           {
             onDelta: (delta) => {
               flushSync(() => {
@@ -191,17 +204,69 @@ export function useMunshiChat() {
           },
         );
       } catch (e) {
-        setMessages(withUser);
-        messagesRef.current = withUser;
-        persistToStorage(withUser);
-        setError(e instanceof Error ? e.message : String(e));
+        if (e instanceof ChatAbortError) {
+          setMessages((prev) => {
+            const next = prev.map((m) =>
+              m.id === assistantId && m.steps ? { ...m, steps: completeRunningSteps(m.steps) } : m,
+            );
+            messagesRef.current = next;
+            return next;
+          });
+        } else {
+          setMessages(withUser);
+          messagesRef.current = withUser;
+          persistToStorage(withUser);
+          setError(e instanceof Error ? e.message : String(e));
+        }
       } finally {
+        abortRef.current = null;
         setStreamingId(null);
         setBusy(false);
         persistToStorage(messagesRef.current);
       }
     },
     [apiKey, busy, persistToStorage],
+  );
+
+  const send = useCallback(
+    async (question: string, snapshot: PortfolioSnapshot, onNeedApiKey?: () => void) => {
+      await runQuestion(question, messagesRef.current, snapshot, onNeedApiKey);
+    },
+    [runQuestion],
+  );
+
+  const regenerate = useCallback(
+    async (assistantId: string, snapshot: PortfolioSnapshot, onNeedApiKey?: () => void) => {
+      if (busy) return;
+      const msgs = messagesRef.current;
+      const idx = msgs.findIndex((m) => m.id === assistantId);
+      if (idx <= 0) return;
+      const userMsg = msgs[idx - 1];
+      if (!userMsg || userMsg.role !== "user") return;
+      const history = msgs.slice(0, idx - 1);
+      setMessages(history);
+      messagesRef.current = history;
+      await runQuestion(userMsg.content, history, snapshot, onNeedApiKey);
+    },
+    [busy, runQuestion],
+  );
+
+  const startEdit = useCallback(
+    (userId: string) => {
+      if (busy) return;
+      const msgs = messagesRef.current;
+      const idx = msgs.findIndex((m) => m.id === userId);
+      if (idx < 0) return;
+      const userMsg = msgs[idx];
+      if (userMsg?.role !== "user") return;
+      const trimmed = msgs.slice(0, idx);
+      setMessages(trimmed);
+      messagesRef.current = trimmed;
+      setInput(userMsg.content);
+      setError(null);
+      persistToStorage(trimmed);
+    },
+    [busy, persistToStorage],
   );
 
   useEffect(() => {
@@ -227,6 +292,9 @@ export function useMunshiChat() {
     startNewChat,
     openSession,
     send,
+    stopGeneration,
+    regenerate,
+    startEdit,
     persistToStorage,
   };
 }

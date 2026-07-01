@@ -41,6 +41,7 @@ type ChatRequest = {
   history: ChatMessage[];
   apiKey?: string;
   snapshot: PortfolioSnapshot;
+  signal?: AbortSignal;
 };
 
 export type AgentProgressCallbacks = {
@@ -49,6 +50,17 @@ export type AgentProgressCallbacks = {
 };
 
 const MAX_TOOL_ROUNDS = 8;
+
+export class ChatAbortError extends Error {
+  constructor() {
+    super("Aborted");
+    this.name = "ChatAbortError";
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new ChatAbortError();
+}
 
 function chatHeaders(apiKey?: string): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -70,11 +82,17 @@ async function publishSteps(onSteps: AgentProgressCallbacks["onSteps"], steps: A
   await yieldToUi();
 }
 
-async function fetchToolTurn(messages: AgentMessage[], apiKey?: string): Promise<ChatTurnResponse> {
+async function fetchToolTurn(
+  messages: AgentMessage[],
+  apiKey: string | undefined,
+  signal?: AbortSignal,
+): Promise<ChatTurnResponse> {
+  throwIfAborted(signal);
   const res = await fetch("/api/portfolio/chat", {
     method: "POST",
     headers: chatHeaders(apiKey),
     body: JSON.stringify({ messages, tools: true, stream: false, apiKey }),
+    signal,
   });
   const data = (await res.json().catch(() => ({}))) as ChatTurnResponse & { error?: string };
   if (!res.ok) {
@@ -87,11 +105,14 @@ async function streamAgentTurn(
   messages: AgentMessage[],
   apiKey: string | undefined,
   onDelta: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   const res = await fetch("/api/portfolio/chat", {
     method: "POST",
     headers: chatHeaders(apiKey),
     body: JSON.stringify({ messages, tools: true, stream: true, apiKey }),
+    signal,
   });
 
   if (!res.ok) {
@@ -106,6 +127,7 @@ async function streamAgentTurn(
   let buffer = "";
 
   while (true) {
+    throwIfAborted(signal);
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
@@ -129,10 +151,14 @@ async function streamAgentTurn(
   }
 }
 
-/** Stream pre-generated text word-by-word so the answer does not appear all at once. */
-async function streamTextGradually(text: string, onDelta: (text: string) => void): Promise<void> {
+async function streamTextGradually(
+  text: string,
+  onDelta: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<void> {
   const tokens = text.match(/\S+\s*|\s+/g) ?? [text];
   for (const token of tokens) {
+    throwIfAborted(signal);
     onDelta(token);
     await sleep(14);
   }
@@ -140,6 +166,7 @@ async function streamTextGradually(text: string, onDelta: (text: string) => void
 
 export async function runPortfolioChatAgent(input: ChatRequest, callbacks: AgentProgressCallbacks): Promise<void> {
   const { onDelta, onSteps } = callbacks;
+  const { signal } = input;
   let steps: AgentStep[] = [];
 
   const agentMessages: AgentMessage[] = [
@@ -148,6 +175,7 @@ export async function runPortfolioChatAgent(input: ChatRequest, callbacks: Agent
   ];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+    throwIfAborted(signal);
     const thinkId = newStepId();
     const thinkStart = Date.now();
     steps = [
@@ -163,7 +191,7 @@ export async function runPortfolioChatAgent(input: ChatRequest, callbacks: Agent
     ];
     await publishSteps(onSteps, steps);
 
-    const turn = await fetchToolTurn(agentMessages, input.apiKey);
+    const turn = await fetchToolTurn(agentMessages, input.apiKey, signal);
     const toolCalls = turn.tool_calls ?? turn.message?.tool_calls ?? null;
     const reasoning = (turn.content ?? turn.message?.content ?? "").trim();
 
@@ -205,6 +233,7 @@ export async function runPortfolioChatAgent(input: ChatRequest, callbacks: Agent
       });
 
       for (const tc of toolCalls) {
+        throwIfAborted(signal);
         const args = parseToolArgs(tc.function.arguments);
         const { label, detail } = toolStepLabel(tc.function.name, args);
         const toolStepId = newStepId();
@@ -219,6 +248,7 @@ export async function runPortfolioChatAgent(input: ChatRequest, callbacks: Agent
             label,
             detail,
             toolName: tc.function.name,
+            toolArgs: args,
             startedAt: toolStart,
           },
         ];
@@ -261,7 +291,7 @@ export async function runPortfolioChatAgent(input: ChatRequest, callbacks: Agent
       ];
       await publishSteps(onSteps, steps);
       await ensureMinStepDuration(writeStart);
-      await streamTextGradually(direct, onDelta);
+      await streamTextGradually(direct, onDelta, signal);
       steps = patchStep(steps, writeId, { status: "done", endedAt: Date.now() });
       await publishSteps(onSteps, steps);
       steps = completeRunningSteps(steps);
@@ -293,7 +323,7 @@ export async function runPortfolioChatAgent(input: ChatRequest, callbacks: Agent
       await ensureMinStepDuration(writeStart);
     }
     onDelta(delta);
-  });
+  }, signal);
 
   if (!firstDelta) {
     await ensureMinStepDuration(writeStart);

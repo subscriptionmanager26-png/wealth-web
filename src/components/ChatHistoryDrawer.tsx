@@ -1,6 +1,10 @@
 import { useMemo } from "react";
 
-import { lastMessageActivityIso, lastMessageActivityMs, type ChatSession } from "../lib/chatHistory";
+import {
+  groupSessionsByDate,
+  lastMessageActivityIso,
+  type ChatSession,
+} from "../lib/chatHistory";
 
 type Props = {
   open: boolean;
@@ -17,10 +21,7 @@ function formatWhen(iso: string): string {
 }
 
 export function ChatHistoryDrawer({ open, sessions, activeSessionId, onClose, onSelect }: Props) {
-  const orderedSessions = useMemo(
-    () => [...sessions].sort((a, b) => lastMessageActivityMs(b) - lastMessageActivityMs(a)),
-    [sessions],
-  );
+  const grouped = useMemo(() => groupSessionsByDate(sessions), [sessions]);
 
   if (!open) return null;
 
@@ -33,32 +34,39 @@ export function ChatHistoryDrawer({ open, sessions, activeSessionId, onClose, on
         onClick={(e) => e.stopPropagation()}
       >
         <div className="chat-drawer-head">
-          <h2>Previous chats</h2>
+          <h2>Chats</h2>
           <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
             ×
           </button>
         </div>
         <p className="text-muted chat-drawer-note">Saved on this device only.</p>
 
-        {orderedSessions.length === 0 ? (
+        {grouped.length === 0 ? (
           <p className="chat-drawer-empty">No previous chats yet.</p>
         ) : (
-          <ul className="chat-drawer-list">
-            {orderedSessions.map((s) => (
-              <li key={s.id}>
-                <button
-                  type="button"
-                  className={`chat-drawer-item${s.id === activeSessionId ? " chat-drawer-item-active" : ""}`}
-                  onClick={() => onSelect(s.id)}
-                >
-                  <span className="chat-drawer-item-title">{s.title}</span>
-                  <span className="chat-drawer-item-meta">
-                    {s.messages.length} messages · {formatWhen(lastMessageActivityIso(s))}
-                  </span>
-                </button>
-              </li>
+          <div className="chat-drawer-scroll">
+            {grouped.map((group) => (
+              <section key={group.label} className="chat-drawer-group">
+                <h3 className="chat-drawer-group-label">{group.label}</h3>
+                <ul className="chat-drawer-list">
+                  {group.sessions.map((s) => (
+                    <li key={s.id}>
+                      <button
+                        type="button"
+                        className={`chat-drawer-item${s.id === activeSessionId ? " chat-drawer-item-active" : ""}`}
+                        onClick={() => onSelect(s.id)}
+                      >
+                        <span className="chat-drawer-item-title">{s.title}</span>
+                        <span className="chat-drawer-item-meta">
+                          {s.messages.length} messages · {formatWhen(lastMessageActivityIso(s))}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
             ))}
-          </ul>
+          </div>
         )}
       </aside>
     </div>

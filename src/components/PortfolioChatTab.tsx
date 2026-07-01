@@ -9,7 +9,10 @@ import type { UpvalySchemeDetail } from "@mobile/utils/upvalyMfApi";
 import type { XRayHoldingRow, XRaySectorRow } from "@mobile/utils/xrayAggregations";
 import type { PortfolioSnapshot } from "../lib/portfolioTools";
 import { ChatAgentSteps } from "./ChatAgentSteps";
+import { ChatComposer } from "./ChatComposer";
+import { ChatEmptyState } from "./ChatEmptyState";
 import { ChatHistoryDrawer } from "./ChatHistoryDrawer";
+import { ChatMessageActions } from "./ChatMessageActions";
 import { ChatMessageContent } from "./ChatMessageContent";
 import { MistralSettingsModal } from "./MistralSettingsModal";
 
@@ -80,6 +83,9 @@ export function PortfolioChatTab({
     refreshSessions,
     openSession,
     send,
+    stopGeneration,
+    regenerate,
+    startEdit,
   } = chat;
 
   const snapshot = useMemo(
@@ -122,6 +128,12 @@ export function PortfolioChatTab({
     onHistoryClose();
   }
 
+  function handleSubmit() {
+    void send(input, snapshot, onSettingsOpen);
+  }
+
+  const inputDisabled = !hasPortfolioData || !apiKey;
+
   return (
     <>
       <ChatHistoryDrawer
@@ -148,91 +160,97 @@ export function PortfolioChatTab({
           <p className="text-muted portfolio-chat-loading-note">Loading fund metrics for richer answers…</p>
         ) : null}
 
-        {messages.length === 0 ? (
-          <div className="portfolio-chat-starters">
-            {STARTERS.map((q) => (
-              <button
-                key={q}
-                type="button"
-                className="chip-btn"
-                onClick={() => void send(q, snapshot, onSettingsOpen)}
-                disabled={busy || !apiKey || !hasPortfolioData}
-              >
-                {q}
-              </button>
-            ))}
-          </div>
-        ) : null}
+        <div className="portfolio-chat-body">
+          {messages.length === 0 ? (
+            <ChatEmptyState
+              starters={STARTERS}
+              onSelect={(q) => void send(q, snapshot, onSettingsOpen)}
+              disabled={busy || !apiKey || !hasPortfolioData}
+              hasApiKey={Boolean(apiKey)}
+              hasPortfolioData={hasPortfolioData}
+              onSettingsOpen={onSettingsOpen}
+            />
+          ) : (
+            <div className="portfolio-chat-thread" ref={threadRef} aria-live="polite">
+              {messages.map((m) => {
+                const nonWriteRunning = m.steps?.some((s) => s.status === "running" && s.kind !== "write");
+                const isActiveStream = streamingId === m.id;
+                const showAnswer =
+                  m.role === "assistant" &&
+                  m.content.trim().length > 0 &&
+                  (!nonWriteRunning || !isActiveStream);
+                const isStreaming = isActiveStream && m.content.length > 0 && !nonWriteRunning;
 
-        <div className="portfolio-chat-thread" ref={threadRef} aria-live="polite">
-          {messages.map((m) => {
-            const nonWriteRunning = m.steps?.some((s) => s.status === "running" && s.kind !== "write");
-            const isActiveStream = streamingId === m.id;
-            const showAnswer =
-              m.role === "assistant" &&
-              m.content.trim().length > 0 &&
-              (!nonWriteRunning || !isActiveStream);
-            const isStreaming = isActiveStream && m.content.length > 0 && !nonWriteRunning;
+                if (m.role === "user") {
+                  return (
+                    <div key={m.id} className="chat-message chat-message-user">
+                      <div className="chat-message-inner">
+                        <div className="portfolio-chat-bubble portfolio-chat-bubble-user">
+                          <div className="portfolio-chat-text">{m.content}</div>
+                        </div>
+                        <ChatMessageActions
+                          role="user"
+                          content={m.content}
+                          onEdit={() => startEdit(m.id)}
+                          disabled={busy}
+                        />
+                      </div>
+                    </div>
+                  );
+                }
 
-            if (m.role === "user") {
-              return (
-                <div key={m.id} className="portfolio-chat-bubble portfolio-chat-bubble-user">
-                  <div className="portfolio-chat-role">You</div>
-                  <div className="portfolio-chat-text">{m.content}</div>
-                </div>
-              );
-            }
-
-            return (
-              <div key={m.id} className="portfolio-chat-turn">
-                {m.steps?.length ? (
-                  <div className="portfolio-chat-trace-wrap">
-                    <ChatAgentSteps
-                      steps={m.steps}
-                      active={isActiveStream || busy}
-                      hasAnswer={m.content.trim().length > 0}
-                    />
+                return (
+                  <div key={m.id} className="chat-message chat-message-assistant">
+                    <div className="chat-message-inner">
+                      {m.steps?.length ? (
+                        <div className="portfolio-chat-trace-wrap">
+                          <ChatAgentSteps
+                            steps={m.steps}
+                            active={isActiveStream || busy}
+                            hasAnswer={m.content.trim().length > 0}
+                          />
+                        </div>
+                      ) : null}
+                      {(showAnswer || isStreaming) && (
+                        <div className="portfolio-chat-reply">
+                          {showAnswer || isStreaming ? (
+                            <ChatMessageContent content={m.content} streaming={isStreaming} />
+                          ) : null}
+                        </div>
+                      )}
+                      {m.content.trim() && !isActiveStream ? (
+                        <ChatMessageActions
+                          role="assistant"
+                          content={m.content}
+                          onRegenerate={() => void regenerate(m.id, snapshot, onSettingsOpen)}
+                          disabled={busy}
+                        />
+                      ) : null}
+                    </div>
                   </div>
-                ) : null}
-                <div className="portfolio-chat-bubble portfolio-chat-bubble-assistant">
-                  <div className="portfolio-chat-role">Munshi Ji</div>
-                  {showAnswer ? (
-                    <ChatMessageContent content={m.content} streaming={isStreaming} />
-                  ) : null}
-                </div>
-              </div>
-            );
-          })}
+                );
+              })}
+            </div>
+          )}
         </div>
-
-        {!apiKey ? (
-          <p className="portfolio-chat-key-prompt">Open Settings (top right) to add your Mistral API key.</p>
-        ) : null}
 
         {error ? <div className="portfolio-chat-error">{error}</div> : null}
 
-        <form
-          className="portfolio-chat-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void send(input, snapshot, onSettingsOpen);
-          }}
-        >
-          <input
-            className="portfolio-chat-input"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={hasPortfolioData ? "Ask about your portfolio…" : "Upload a CAS to start"}
-            disabled={busy || !hasPortfolioData}
-          />
-          <button
-            type="submit"
-            className="btn-primary"
-            disabled={busy || !input.trim() || !apiKey || !hasPortfolioData}
-          >
-            Send
-          </button>
-        </form>
+        <ChatComposer
+          value={input}
+          onChange={setInput}
+          onSubmit={handleSubmit}
+          onStop={stopGeneration}
+          busy={busy}
+          disabled={inputDisabled}
+          placeholder={
+            !hasPortfolioData
+              ? "Upload a CAS to start"
+              : !apiKey
+                ? "Add API key in Settings to chat"
+                : "Ask about your portfolio…"
+          }
+        />
       </div>
 
       <MistralSettingsModal

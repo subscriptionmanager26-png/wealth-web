@@ -160,3 +160,38 @@ export function deleteChatSession(id: string): string | null {
   writeStore(store);
   return store.activeSessionId;
 }
+
+function startOfDay(ms: number): number {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+export function sessionDateGroupLabel(session: ChatSession, now = Date.now()): string {
+  const activity = lastMessageActivityMs(session);
+  const today = startOfDay(now);
+  const activityDay = startOfDay(activity);
+  const diffDays = Math.floor((today - activityDay) / (24 * 60 * 60 * 1000));
+
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+  if (diffDays < 7) return "Previous 7 days";
+  if (diffDays < 30) return "Previous 30 days";
+  return "Older";
+}
+
+export function groupSessionsByDate(sessions: ChatSession[]): { label: string; sessions: ChatSession[] }[] {
+  const groups = new Map<string, ChatSession[]>();
+  const order = ["Today", "Yesterday", "Previous 7 days", "Previous 30 days", "Older"];
+
+  for (const session of sessions) {
+    const label = sessionDateGroupLabel(session);
+    const list = groups.get(label) ?? [];
+    list.push(session);
+    groups.set(label, list);
+  }
+
+  return order
+    .filter((label) => groups.has(label))
+    .map((label) => ({ label, sessions: groups.get(label)! }));
+}
