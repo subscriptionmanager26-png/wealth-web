@@ -1,9 +1,12 @@
 import { useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import type { Components } from "react-markdown";
+
+import { normalizeChatMarkdown } from "../lib/normalizeChatMarkdown";
 
 type Props = {
   content: string;
@@ -58,17 +61,19 @@ const markdownComponents: Components = {
 };
 
 export function ChatMessageContent({ content, streaming }: Props) {
-  if (!content && !streaming) return null;
+  const markdown = useMemo(() => normalizeChatMarkdown(content), [content]);
+
+  if (!markdown && !streaming) return null;
 
   return (
     <div className={`portfolio-chat-markdown${streaming ? " portfolio-chat-markdown-streaming" : ""}`}>
-      {content ? (
+      {markdown ? (
         <ReactMarkdown
-          remarkPlugins={[remarkGfm, remarkMath]}
+          remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
           rehypePlugins={[rehypeKatex]}
           components={markdownComponents}
         >
-          {content}
+          {markdown}
         </ReactMarkdown>
       ) : null}
       {streaming ? <span className="portfolio-chat-cursor" aria-hidden /> : null}
