@@ -6,6 +6,7 @@ import { diagLog } from "./diagnosticsLog";
 const LOGGED_URL_PATTERNS = [
   /\/api\/amfi\//i,
   /\/api\/nifty\//i,
+  /\/api\/portfolio\/chat/i,
   /api\.mfapi\.in/i,
   /unique_schemes\.csv/i,
 ];

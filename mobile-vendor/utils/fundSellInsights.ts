@@ -99,7 +99,7 @@ function vintageYears(inceptionDate?: string): number | null {
 function fundCagr(scheme: UpvalySchemeDetail, period: "1y" | "3y" | "5y"): number | null {
   const fromCagr = scheme.cagrByPeriod?.[period];
   if (fromCagr != null && Number.isFinite(fromCagr)) return fromCagr;
-  const row = scheme.returnsByTimeframe?.[period];
+  const row = scheme.returnsByTimeframe[period];
   return row?.valuePct ?? null;
 }
 

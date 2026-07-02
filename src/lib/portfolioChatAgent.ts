@@ -1,6 +1,7 @@
 import {
   completeRunningSteps,
   ensureMinStepDuration,
+  MIN_TOOL_MS,
   newStepId,
   patchStep,
   pauseBetweenSteps,
@@ -10,6 +11,8 @@ import {
   type AgentStep,
 } from "./agentSteps";
 import { executePortfolioTool, type PortfolioSnapshot } from "./portfolioTools";
+import { postChatRequest, streamChatRequest } from "./chatApiRoute";
+import { diagLog } from "./diagnosticsLog";
 import type { ChatMessage } from "./portfolioChat";
 
 export type AgentMessage = {
@@ -34,6 +37,7 @@ type ChatTurnResponse = {
   content?: string;
   tool_calls?: MistralToolCall[] | null;
   error?: string;
+  _timing?: { mistralMs?: number };
 };
 
 type ChatRequest = {
@@ -62,11 +66,13 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new ChatAbortError();
 }
 
-function chatHeaders(apiKey?: string): Record<string, string> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const key = apiKey?.trim();
-  if (key) headers["X-Mistral-Api-Key"] = key;
-  return headers;
+function formatTimingDetail(apiMs: number, uiPaddingMs: number, serverMistralMs?: number): string {
+  const parts = [`API ${(apiMs / 1000).toFixed(1)}s`];
+  if (serverMistralMs != null && serverMistralMs > 0) {
+    parts.push(`Mistral ${(serverMistralMs / 1000).toFixed(1)}s`);
+  }
+  if (uiPaddingMs >= 50) parts.push(`UI ${(uiPaddingMs / 1000).toFixed(1)}s`);
+  return parts.join(" · ");
 }
 
 function parseToolArgs(raw: string): Record<string, unknown> {
@@ -88,12 +94,7 @@ async function fetchToolTurn(
   signal?: AbortSignal,
 ): Promise<ChatTurnResponse> {
   throwIfAborted(signal);
-  const res = await fetch("/api/portfolio/chat", {
-    method: "POST",
-    headers: chatHeaders(apiKey),
-    body: JSON.stringify({ messages, tools: true, stream: false, apiKey }),
-    signal,
-  });
+  const res = await postChatRequest({ messages, tools: true, stream: false, apiKey }, apiKey, signal);
   const data = (await res.json().catch(() => ({}))) as ChatTurnResponse & { error?: string };
   if (!res.ok) {
     throw new Error(typeof data?.error === "string" ? data.error : `Request failed (${res.status})`);
@@ -108,47 +109,10 @@ async function streamAgentTurn(
   signal?: AbortSignal,
 ): Promise<void> {
   throwIfAborted(signal);
-  const res = await fetch("/api/portfolio/chat", {
-    method: "POST",
-    headers: chatHeaders(apiKey),
-    body: JSON.stringify({ messages, tools: true, stream: true, apiKey }),
-    signal,
-  });
-
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(typeof data?.error === "string" ? data.error : `Request failed (${res.status})`);
-  }
-
-  if (!res.body) throw new Error("Streaming response was empty");
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
+  await streamChatRequest({ messages, tools: true, stream: true, apiKey }, apiKey, (delta) => {
     throwIfAborted(signal);
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-      const payload = trimmed.slice(5).trim();
-      if (!payload) continue;
-      try {
-        const parsed = JSON.parse(payload) as { text?: string; error?: string };
-        if (parsed.error) throw new Error(parsed.error);
-        if (typeof parsed.text === "string" && parsed.text.length) onDelta(parsed.text);
-      } catch (e) {
-        if (e instanceof Error && e.message !== "Unexpected end of JSON input") throw e;
-      }
-    }
-  }
+    onDelta(delta);
+  }, signal);
 }
 
 async function streamTextGradually(
@@ -156,11 +120,11 @@ async function streamTextGradually(
   onDelta: (text: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const tokens = text.match(/\S+\s*|\s+/g) ?? [text];
-  for (const token of tokens) {
+  const chunks = text.match(/[^\s]+\s*|\s+/g) ?? [text];
+  for (const chunk of chunks) {
     throwIfAborted(signal);
-    onDelta(token);
-    await sleep(14);
+    onDelta(chunk);
+    if (chunk.trim().length) await sleep(4);
   }
 }
 
@@ -191,15 +155,34 @@ export async function runPortfolioChatAgent(input: ChatRequest, callbacks: Agent
     ];
     await publishSteps(onSteps, steps);
 
+    const apiStart = Date.now();
     const turn = await fetchToolTurn(agentMessages, input.apiKey, signal);
+    const apiMs = Date.now() - apiStart;
     const toolCalls = turn.tool_calls ?? turn.message?.tool_calls ?? null;
     const reasoning = (turn.content ?? turn.message?.content ?? "").trim();
+    const serverMistralMs = turn._timing?.mistralMs;
 
+    const beforePad = Date.now();
     await ensureMinStepDuration(thinkStart);
+    const uiPaddingMs = Date.now() - beforePad;
+
+    diagLog("chat", `Think round ${round + 1}: ${formatTimingDetail(apiMs, uiPaddingMs, serverMistralMs)}`, {
+      round: round + 1,
+      apiMs,
+      uiPaddingMs,
+      serverMistralMs,
+      toolCount: toolCalls?.length ?? 0,
+    });
+
+    const thinkDetail = toolCalls?.length
+      ? `Selected ${toolCalls.length} tool${toolCalls.length === 1 ? "" : "s"}`
+      : "Ready to respond";
     steps = patchStep(steps, thinkId, {
       status: "done",
       endedAt: Date.now(),
-      detail: toolCalls?.length ? `Selected ${toolCalls.length} tool${toolCalls.length === 1 ? "" : "s"}` : "Ready to respond",
+      apiMs,
+      uiPaddingMs,
+      detail: `${thinkDetail} · ${formatTimingDetail(apiMs, uiPaddingMs, serverMistralMs)}`,
     });
     await publishSteps(onSteps, steps);
     await pauseBetweenSteps();
@@ -262,7 +245,7 @@ export async function runPortfolioChatAgent(input: ChatRequest, callbacks: Agent
           tool_call_id: tc.id,
         });
 
-        await ensureMinStepDuration(toolStart);
+        await ensureMinStepDuration(toolStart, MIN_TOOL_MS);
         const lineCount = result.split("\n").filter((l) => l.trim() && !l.startsWith("===")).length;
         steps = patchStep(steps, toolStepId, {
           status: "done",

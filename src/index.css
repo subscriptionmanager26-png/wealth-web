@@ -3287,6 +3287,12 @@ input {
   line-height: 1.35;
 }
 
+.chat-agent-step-duration {
+  font-weight: 500;
+  color: #94a3b8;
+  font-size: 0.75rem;
+}
+
 .chat-agent-tool-head {
   display: flex;
   align-items: center;
@@ -3409,6 +3415,36 @@ input {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.mistral-route-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mistral-route-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+.mistral-route-option input {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.mistral-route-option > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mistral-route-option-detail {
+  font-size: 0.8125rem;
+  line-height: 1.35;
 }
 
 .mistral-settings-help ol {

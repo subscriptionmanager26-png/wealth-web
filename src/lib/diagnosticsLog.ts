@@ -13,12 +13,13 @@ export type DiagnosticsCategory =
   | "storage"
   | "nav"
   | "parse"
-  | "upload";
+  | "upload"
+  | "chat";
 
 const STORAGE_KEY = "wealth_web_diag_log_v1";
 const SESSION_KEY = "wealth_web_diag_session_v1";
-const MAX_LINES = 4_000;
-const MAX_PERSIST_CHARS = 120_000;
+const MAX_LINES = 5_000;
+const MAX_PERSIST_CHARS = 300_000;
 
 function formatTs(d = new Date()): string {
   const p = (n: number, len = 2) => String(n).padStart(len, "0");

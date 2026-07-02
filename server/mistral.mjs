@@ -118,6 +118,7 @@ export async function mistralChatTurn({ messages, apiKey: apiKeyInput, tools = f
     body.tool_choice = "auto";
   }
 
+  const t0 = Date.now();
   const res = await fetch(MISTRAL_API_URL, {
     method: "POST",
     headers: {
@@ -128,6 +129,7 @@ export async function mistralChatTurn({ messages, apiKey: apiKeyInput, tools = f
   });
 
   const text = await res.text();
+  const mistralMs = Date.now() - t0;
   if (!res.ok) await readMistralError(res, text);
 
   const data = JSON.parse(text);
@@ -137,6 +139,7 @@ export async function mistralChatTurn({ messages, apiKey: apiKeyInput, tools = f
     model: data?.model ?? DEFAULT_MODEL,
     content: message.content?.trim() ?? "",
     tool_calls: message.tool_calls ?? null,
+    _timing: { mistralMs },
   };
 }
 

@@ -12,6 +12,10 @@ export type AgentStep = {
   toolArgs?: Record<string, unknown>;
   startedAt?: number;
   endedAt?: number;
+  /** Wall time waiting on /api/portfolio/chat (mostly Mistral + Vercel). */
+  apiMs?: number;
+  /** Extra delay we add for step animation / min duration. */
+  uiPaddingMs?: number;
 };
 
 const TOOL_LABELS: Record<string, string> = {
@@ -117,17 +121,19 @@ export function yieldToUi(): Promise<void> {
   });
 }
 
-const MIN_STEP_MS = 480;
+const MIN_THINK_WRITE_MS = 120;
+export const MIN_TOOL_MS = 0;
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function ensureMinStepDuration(startedAt: number): Promise<void> {
+export async function ensureMinStepDuration(startedAt: number, minMs = MIN_THINK_WRITE_MS): Promise<void> {
+  if (minMs <= 0) return;
   const elapsed = Date.now() - startedAt;
-  if (elapsed < MIN_STEP_MS) await sleep(MIN_STEP_MS - elapsed);
+  if (elapsed < minMs) await sleep(minMs - elapsed);
 }
 
 export async function pauseBetweenSteps(): Promise<void> {
-  await sleep(140);
+  await sleep(40);
 }

@@ -8,8 +8,8 @@ type Props = {
   hasAnswer: boolean;
 };
 
-const REVEAL_DONE_MS = 360;
-const REVEAL_RUNNING_MS = 120;
+const REVEAL_DONE_MS = 80;
+const REVEAL_RUNNING_MS = 24;
 
 function StepIcon({ step }: { step: AgentStep }) {
   if (step.status === "running") {
@@ -21,13 +21,21 @@ function StepIcon({ step }: { step: AgentStep }) {
   return <span className="chat-agent-step-dot chat-agent-step-dot-done" aria-hidden>✓</span>;
 }
 
+function stepDurationLabel(step: AgentStep): string | null {
+  if (!step.startedAt || !step.endedAt || step.status !== "done") return null;
+  const totalMs = step.endedAt - step.startedAt;
+  if (totalMs < 100) return null;
+  return `${(totalMs / 1000).toFixed(1)}s`;
+}
+
 function StepRow({ step, isLast }: { step: AgentStep; isLast: boolean }) {
   const isRunning = step.status === "running";
   const [reasonOpen, setReasonOpen] = useState(false);
+  const duration = stepDurationLabel(step);
 
   const showDetail =
     step.detail &&
-    (step.kind === "tool" || step.label === "Reasoning" || (isRunning && step.kind === "think"));
+    (step.kind === "tool" || step.label === "Reasoning" || step.kind === "think" || (isRunning && step.kind === "think"));
 
   return (
     <li
@@ -43,7 +51,10 @@ function StepRow({ step, isLast }: { step: AgentStep; isLast: boolean }) {
             <code className="chat-agent-tool-name">{step.label}</code>
           </div>
         ) : (
-          <span className="chat-agent-step-label">{step.label}</span>
+          <span className="chat-agent-step-label">
+            {step.label}
+            {duration ? <span className="chat-agent-step-duration"> {duration}</span> : null}
+          </span>
         )}
         {step.label === "Reasoning" && step.detail ? (
           <button

@@ -36,8 +36,23 @@ export function corsHeaders(origin, allowOrigin = process.env.CORS_ALLOW_ORIGIN 
   };
 }
 
+function normalizeNiftyTriBody(body) {
+  const raw = typeof body === "string" ? body : body.toString("utf8");
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.cinfo === "string") return raw;
+    if (parsed && typeof parsed.indexName === "string") {
+      return JSON.stringify({ cinfo: raw });
+    }
+  } catch {
+    /* not JSON — treat as pre-serialized cinfo string */
+  }
+  return JSON.stringify({ cinfo: raw });
+}
+
 export async function fetchNiftyTri(body) {
   logProxyStats("nifty");
+  const postBody = normalizeNiftyTriBody(body);
   return fetch(NIFTY_TRI, {
     method: "POST",
     headers: {
@@ -47,7 +62,7 @@ export async function fetchNiftyTri(body) {
       Referer: "https://www.niftyindices.com/reports/historical-data",
       "X-Requested-With": "XMLHttpRequest",
     },
-    body: typeof body === "string" ? body : body.toString("utf8"),
+    body: postBody,
     signal: AbortSignal.timeout(60000),
   });
 }

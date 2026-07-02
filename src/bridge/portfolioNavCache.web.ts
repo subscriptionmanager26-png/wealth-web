@@ -267,23 +267,22 @@ export async function saveCachedPortfolioAnalytics(
     console.warn("[portfolioNavCache] IndexedDB save failed", e);
   }
 
-  const backupOk = await writeLocalBackup(raw);
-  await writeLegacyLocalStorage(raw);
-  writeMeta(payload);
-
-  if (!idbOk && !backupOk) {
-    throw new Error("Could not save portfolio NAV to device storage");
-  }
-
-  if (!idbOk) {
+  if (idbOk) {
+    try {
+      localStorage.removeItem(LEGACY_LOCAL_KEY);
+      localStorage.removeItem(LOCAL_BACKUP_KEY);
+    } catch {
+      /* ignore */
+    }
+  } else {
+    const backupOk = await writeLocalBackup(raw);
+    if (!backupOk) {
+      throw new Error("Could not save portfolio NAV to device storage");
+    }
     console.warn("[portfolioNavCache] saved to localStorage backup only — IndexedDB unavailable");
   }
 
-  try {
-    localStorage.removeItem(LEGACY_LOCAL_KEY);
-  } catch {
-    /* ignore */
-  }
+  writeMeta(payload);
   return updatedAt;
 }
 

@@ -126,7 +126,9 @@ export function saveChatSession(
   session: ChatSession,
   messages: ChatMessage[],
 ): { session: ChatSession; storage: StorageWriteResult } {
-  const trimmed = messages.filter((m) => m.role === "user" || m.content.trim().length > 0);
+  const trimmed = messages
+    .filter((m) => m.role === "user" || m.content.trim().length > 0)
+    .map((m) => (m.role === "assistant" ? { ...m, steps: undefined } : m));
   const activityMs = trimmed.length
     ? lastMessageActivityMs({ ...session, messages: trimmed })
     : Date.now();
