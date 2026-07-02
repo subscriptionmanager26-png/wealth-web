@@ -3461,6 +3461,179 @@ input {
   color: var(--orange-dark);
 }
 
+.munshi-memory-panel {
+  border-top: 1px solid #e2e8f0;
+}
+
+.munshi-memory-status {
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
+
+.munshi-memory-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin: 0 0 10px;
+}
+
+.munshi-memory-status-grid dt {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #64748b;
+  margin: 0 0 2px;
+}
+
+.munshi-memory-status-grid dd {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.munshi-memory-status-msg {
+  margin: 0 0 8px;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: #334155;
+}
+
+.munshi-memory-policy-note {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.munshi-memory-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.munshi-memory-progress {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+
+.munshi-memory-block {
+  margin-top: 14px;
+}
+
+.munshi-memory-block h4 {
+  margin: 0 0 8px;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.munshi-memory-empty {
+  font-size: 0.8125rem;
+  margin: 0;
+}
+
+.munshi-memory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.munshi-memory-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: start;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  font-size: 0.8125rem;
+}
+
+.munshi-memory-text {
+  line-height: 1.45;
+}
+
+.munshi-memory-priority {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.munshi-memory-priority-high {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.munshi-memory-priority-medium {
+  background: #ffedd5;
+  color: #c2410c;
+}
+
+.munshi-memory-priority-low {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.munshi-memory-forget {
+  border: none;
+  background: none;
+  color: #64748b;
+  font-size: 0.75rem;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.munshi-memory-forget:hover {
+  color: #b91c1c;
+}
+
+.munshi-memory-day-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.munshi-memory-day {
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #fafafa;
+}
+
+.munshi-memory-day-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  font-size: 0.8125rem;
+}
+
+.munshi-memory-day-text {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: #334155;
+  white-space: pre-wrap;
+}
+
 .chat-drawer-backdrop {
   position: fixed;
   inset: 0;

@@ -7,9 +7,16 @@ import {
 import type { FundHolding } from "../buildHoldings";
 import { computePeriodReturn, navPointsFromSeries, type TimeFrame } from "../performanceUtils";
 import { fmt, pct, viewLabel } from "./format";
+import {
+  formatPortfolioPeriodReturns,
+  getBenchmarkReturns,
+  getMarketFundDetails,
+  listBenchmarkIndices,
+  searchMarketFunds,
+} from "./marketHandlers";
 import type { PortfolioSnapshot, PortfolioToolName } from "./types";
 
-const DEFAULT_FRAMES: TimeFrame[] = ["MTD", "1Y", "3Y", "5Y"];
+const COMPARISON_FRAMES: TimeFrame[] = ["MTD", "1M", "3M", "6M", "1Y", "3Y", "5Y"];
 
 function totalWeight(holdings: FundHolding[]): number {
   return holdings.reduce((a, h) => a + h.amount, 0) || 1;
@@ -45,6 +52,12 @@ export function listAvailableData(snapshot: PortfolioSnapshot): string {
         .map(([id]) => id)
     : [];
   lines.push(`Benchmarks loaded: ${benches.length ? benches.join(", ") : "none"}`);
+  const screenerCount = Object.keys(snapshot.screenerFunds ?? {}).length;
+  lines.push(`Market screener (Equity DG): ${screenerCount ? `${screenerCount} funds` : "not loaded"}`);
+  if (screenerCount) {
+    lines.push("  → search_market_funds / get_market_fund_details for non-portfolio funds");
+    lines.push("  → list_benchmark_indices / get_benchmark_returns for Nifty TRI indices");
+  }
   return lines.join("\n");
 }
 
@@ -65,28 +78,12 @@ export function getPortfolioSummary(snapshot: PortfolioSnapshot): string {
 
 export function getPortfolioPerformance(
   snapshot: PortfolioSnapshot,
-  args: { include_calendar_years?: boolean },
+  args: { include_calendar_years?: boolean; frames?: string[] },
 ): string {
-  const perf = snapshot.perf;
-  if (!perf) return "Portfolio NAV performance: not loaded yet.";
-
-  const lines = ["=== PORTFOLIO PERFORMANCE (NAV-based) ==="];
-  if (perf.mtdReturn != null) lines.push(`MTD return: ${pct(perf.mtdReturn)}`);
-  if (perf.ytdReturn != null) lines.push(`YTD return: ${pct(perf.ytdReturn)}`);
-  if (perf.return1Y != null) lines.push(`1Y return: ${pct(perf.return1Y)}`);
-  if (perf.annualized3Y != null) lines.push(`3Y annualized: ${pct(perf.annualized3Y)}`);
-  if (perf.annualized5Y != null) lines.push(`5Y annualized: ${pct(perf.annualized5Y)}`);
-  if (perf.annualizedSinceInception != null) {
-    lines.push(`Since inception (annualized): ${pct(perf.annualizedSinceInception)}`);
-  }
-
-  if (args.include_calendar_years && perf.yearWiseReturns?.length) {
-    lines.push("", "Calendar year returns:");
-    for (const row of perf.yearWiseReturns.slice(-6)) {
-      lines.push(`- ${row.year}: ${pct(row.ret)}`);
-    }
-  }
-  return lines.join("\n");
+  return formatPortfolioPeriodReturns(snapshot, {
+    frames: args.frames,
+    include_calendar_years: Boolean(args.include_calendar_years),
+  });
 }
 
 export function getBenchmarkComparison(
@@ -103,10 +100,10 @@ export function getBenchmarkComparison(
   }
 
   const frameSet = new Set(
-    (args.frames?.length ? args.frames : DEFAULT_FRAMES) as TimeFrame[],
+    (args.frames?.length ? args.frames : COMPARISON_FRAMES) as TimeFrame[],
   );
   const lines = [`=== BENCHMARK COMPARISON (vs ${label} TRI) ===`];
-  for (const frame of DEFAULT_FRAMES) {
+  for (const frame of COMPARISON_FRAMES) {
     if (!frameSet.has(frame)) continue;
     const port = computePeriodReturn(portfolioNav, frame);
     const bench = computePeriodReturn(benchNav, frame);
@@ -247,7 +244,7 @@ export function getFundDetails(
 
   if (!funds.length) return `No fund matched "${args.fund_name_query ?? ""}".`;
 
-  const lines = ["=== FUND DETAILS ==="];
+  const lines = ["=== FUND DETAILS (your portfolio holdings) ==="];
   for (const h of funds) {
     const scheme = schemeFor(h, snapshot);
     lines.push("", `Fund: ${h.name}`);
@@ -374,9 +371,17 @@ export function executePortfolioTool(
     case "get_portfolio_performance":
       return getPortfolioPerformance(snapshot, {
         include_calendar_years: Boolean(args.include_calendar_years),
+        frames: Array.isArray(args.frames) ? args.frames.map(String) : undefined,
       });
     case "get_benchmark_comparison":
       return getBenchmarkComparison(snapshot, {
+        benchmark_id: typeof args.benchmark_id === "string" ? args.benchmark_id : undefined,
+        frames: Array.isArray(args.frames) ? args.frames.map(String) : undefined,
+      });
+    case "list_benchmark_indices":
+      return listBenchmarkIndices(snapshot);
+    case "get_benchmark_returns":
+      return getBenchmarkReturns(snapshot, {
         benchmark_id: typeof args.benchmark_id === "string" ? args.benchmark_id : undefined,
         frames: Array.isArray(args.frames) ? args.frames.map(String) : undefined,
       });
@@ -402,6 +407,19 @@ export function executePortfolioTool(
       return getFundDetails(snapshot, {
         fund_name_query: typeof args.fund_name_query === "string" ? args.fund_name_query : undefined,
         rank_by_weight: typeof args.rank_by_weight === "number" ? args.rank_by_weight : undefined,
+        limit: typeof args.limit === "number" ? args.limit : undefined,
+      });
+    case "search_market_funds":
+      return searchMarketFunds(snapshot, {
+        query: typeof args.query === "string" ? args.query : undefined,
+        category: typeof args.category === "string" ? args.category : undefined,
+        sort_by: typeof args.sort_by === "string" ? args.sort_by : undefined,
+        limit: typeof args.limit === "number" ? args.limit : undefined,
+      });
+    case "get_market_fund_details":
+      return getMarketFundDetails(snapshot, {
+        scheme_code: typeof args.scheme_code === "string" ? args.scheme_code : undefined,
+        name_query: typeof args.name_query === "string" ? args.name_query : undefined,
         limit: typeof args.limit === "number" ? args.limit : undefined,
       });
     case "get_sector_exposure":

@@ -34,8 +34,11 @@ function loadToolCatalog() {
   return cachedToolCatalog;
 }
 
-function buildSystemPrompt() {
-  return `${BASE_SYSTEM_PROMPT}\n\n---\n\n${loadToolCatalog()}`;
+function buildSystemPrompt(memoryContext) {
+  const memory = memoryContext?.trim()
+    ? `\n\n---\n\n## User memory\n${memoryContext.trim()}\n\nPortfolio tool results always override memory if they conflict.`
+    : "";
+  return `${BASE_SYSTEM_PROMPT}${memory}\n\n---\n\n${loadToolCatalog()}`;
 }
 
 function resolveApiKey(apiKeyInput) {
@@ -59,9 +62,9 @@ function normalizeAgentMessages(messages) {
     .slice(-24);
 }
 
-function buildMistralMessages({ messages, context, useTools }) {
+function buildMistralMessages({ messages, context, useTools, memoryContext }) {
   if (useTools) {
-    return [{ role: "system", content: buildSystemPrompt() }, ...normalizeAgentMessages(messages)];
+    return [{ role: "system", content: buildSystemPrompt(memoryContext) }, ...normalizeAgentMessages(messages)];
   }
 
   const userTurns = messages.filter((m) => m.role === "user");
@@ -104,10 +107,42 @@ async function readMistralError(res, text) {
   throw new Error(`Mistral API ${res.status}: ${detail}`);
 }
 
-/** Agent turn with optional tools (non-streaming). */
-export async function mistralChatTurn({ messages, apiKey: apiKeyInput, tools = false }) {
+/** One-shot JSON-oriented completion for client-side memory extraction. */
+export async function mistralMemoryExtract({ systemPrompt, userContent, apiKey: apiKeyInput }) {
   const apiKey = resolveApiKey(apiKeyInput);
-  const mistralMessages = buildMistralMessages({ messages, useTools: tools });
+  const sys = typeof systemPrompt === "string" ? systemPrompt.trim() : "";
+  const user = typeof userContent === "string" ? userContent.trim() : "";
+  if (!sys || !user) throw new Error("systemPrompt and userContent are required");
+
+  const res = await fetch(MISTRAL_API_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: DEFAULT_MODEL,
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: user },
+      ],
+      temperature: 0.1,
+    }),
+  });
+
+  const text = await res.text();
+  if (!res.ok) await readMistralError(res, text);
+
+  const data = JSON.parse(text);
+  const content = data?.choices?.[0]?.message?.content?.trim() ?? "";
+  if (!content) throw new Error("Mistral returned an empty response");
+  return { content, model: data?.model ?? DEFAULT_MODEL };
+}
+
+/** Agent turn with optional tools (non-streaming). */
+export async function mistralChatTurn({ messages, apiKey: apiKeyInput, tools = false, memoryContext }) {
+  const apiKey = resolveApiKey(apiKeyInput);
+  const mistralMessages = buildMistralMessages({ messages, useTools: tools, memoryContext });
 
   const body = {
     model: DEFAULT_MODEL,
@@ -158,9 +193,12 @@ function parseSseLines(buffer, onDataLine) {
 }
 
 /** Stream final answer (no tools). */
-export async function streamMistralChat({ messages, apiKey: apiKeyInput, onChunk }) {
+export async function streamMistralChat({ messages, apiKey: apiKeyInput, onChunk, memoryContext }) {
   const apiKey = resolveApiKey(apiKeyInput);
-  const mistralMessages = [{ role: "system", content: buildSystemPrompt() }, ...normalizeAgentMessages(messages)];
+  const mistralMessages = [
+    { role: "system", content: buildSystemPrompt(memoryContext) },
+    ...normalizeAgentMessages(messages),
+  ];
 
   const res = await fetch(MISTRAL_API_URL, {
     method: "POST",

@@ -1,47 +1,22 @@
-import { deviceStorageGet, deviceStorageSet, type StorageWriteResult } from "./deviceStorage";
 import type { ChatMessage } from "./portfolioChat";
+import {
+  dbDeleteSession,
+  dbLoadActiveSessionId,
+  dbLoadAllSessions,
+  dbLoadSession,
+  dbSaveSession,
+  dbSetActiveSessionId,
+  ensureChatHistoryMigrated,
+  type ChatSessionRecord,
+  type ChatStorageResult,
+} from "./chatHistoryDb";
 
-export type ChatSession = {
-  id: string;
-  title: string;
-  messages: ChatMessage[];
-  createdAt: string;
-  updatedAt: string;
-};
+export type ChatSession = ChatSessionRecord;
 
-type Store = {
-  version: 1;
-  activeSessionId: string | null;
-  sessions: ChatSession[];
-};
-
-const STORAGE_KEY = "wealth_web_munshi_chats_v1";
-const MAX_SESSIONS = 40;
-
-function newSessionId(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
+export type StorageWriteResult = ChatStorageResult;
 
 function hasContent(messages: ChatMessage[]): boolean {
   return messages.some((m) => m.content.trim().length > 0);
-}
-
-function readStore(): Store {
-  try {
-    const raw = deviceStorageGet(STORAGE_KEY);
-    if (!raw) return { version: 1, activeSessionId: null, sessions: [] };
-    const parsed = JSON.parse(raw) as Store;
-    if (parsed?.version !== 1 || !Array.isArray(parsed.sessions)) {
-      return { version: 1, activeSessionId: null, sessions: [] };
-    }
-    return parsed;
-  } catch {
-    return { version: 1, activeSessionId: null, sessions: [] };
-  }
-}
-
-function writeStore(store: Store): StorageWriteResult {
-  return deviceStorageSet(STORAGE_KEY, JSON.stringify(store));
 }
 
 export function titleFromMessages(messages: ChatMessage[]): string {
@@ -57,7 +32,6 @@ function messageTimestampMs(message: ChatMessage): number | null {
   return Number.isFinite(t) && t > 0 ? t : null;
 }
 
-/** Sort key: timestamp of the last message in the thread (falls back to session updatedAt). */
 export function lastMessageActivityMs(session: ChatSession): number {
   for (let i = session.messages.length - 1; i >= 0; i -= 1) {
     const t = messageTimestampMs(session.messages[i]!);
@@ -75,31 +49,34 @@ function sortSessionsByLastMessage(sessions: ChatSession[]): ChatSession[] {
   return [...sessions].sort((a, b) => lastMessageActivityMs(b) - lastMessageActivityMs(a));
 }
 
-/** Sessions that have at least one non-empty message (for history UI). */
-export function loadChatSessions(): ChatSession[] {
-  return sortSessionsByLastMessage(
-    readStore().sessions.filter((s) => hasContent(s.messages)),
-  );
+function newSessionId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function loadActiveChatSessionId(): string | null {
-  return readStore().activeSessionId;
+export async function loadChatSessions(): Promise<ChatSession[]> {
+  await ensureChatHistoryMigrated();
+  const rows = await dbLoadAllSessions();
+  return sortSessionsByLastMessage(rows.filter((s) => hasContent(s.messages)));
 }
 
-export function loadChatSession(id: string): ChatSession | null {
-  return readStore().sessions.find((s) => s.id === id) ?? null;
+export async function loadActiveChatSessionId(): Promise<string | null> {
+  return dbLoadActiveSessionId();
 }
 
-/** Resume the active saved session, if it has messages. */
-export function loadActiveChatSession(): ChatSession | null {
-  const id = loadActiveChatSessionId();
+export async function loadChatSession(id: string): Promise<ChatSession | null> {
+  return dbLoadSession(id);
+}
+
+export async function loadActiveChatSession(): Promise<ChatSession | null> {
+  const id = await loadActiveChatSessionId();
   if (!id) return null;
-  const session = loadChatSession(id);
+  const session = await loadChatSession(id);
   if (!session || !hasContent(session.messages)) return null;
   return session;
 }
 
-export function createChatSession(): ChatSession {
+export async function createChatSession(): Promise<ChatSession> {
+  await ensureChatHistoryMigrated();
   const now = new Date().toISOString();
   const session: ChatSession = {
     id: newSessionId(),
@@ -107,31 +84,22 @@ export function createChatSession(): ChatSession {
     messages: [],
     createdAt: now,
     updatedAt: now,
+    memoryProcessedAt: null,
   };
-  const store = readStore();
-  store.sessions = [session, ...store.sessions.filter((s) => hasContent(s.messages))].slice(0, MAX_SESSIONS);
-  store.activeSessionId = session.id;
-  writeStore(store);
+  await dbSaveSession(session);
   return session;
 }
 
-export function setActiveChatSession(id: string): void {
-  const store = readStore();
-  if (!store.sessions.some((s) => s.id === id)) return;
-  store.activeSessionId = id;
-  writeStore(store);
+export async function setActiveChatSession(id: string): Promise<void> {
+  await dbSetActiveSessionId(id);
 }
 
-export function saveChatSession(
+export async function saveChatSession(
   session: ChatSession,
   messages: ChatMessage[],
-): { session: ChatSession; storage: StorageWriteResult } {
-  const trimmed = messages
-    .filter((m) => m.role === "user" || m.content.trim().length > 0)
-    .map((m) => (m.role === "assistant" ? { ...m, steps: undefined } : m));
-  const activityMs = trimmed.length
-    ? lastMessageActivityMs({ ...session, messages: trimmed })
-    : Date.now();
+): Promise<{ session: ChatSession; storage: StorageWriteResult }> {
+  const trimmed = messages.filter((m) => m.role === "user" || m.content.trim().length > 0);
+  const activityMs = trimmed.length ? lastMessageActivityMs({ ...session, messages: trimmed }) : Date.now();
   const next: ChatSession = {
     ...session,
     messages: trimmed,
@@ -141,26 +109,12 @@ export function saveChatSession(
 
   if (!hasContent(trimmed)) return { session: next, storage: { ok: true } };
 
-  const store = readStore();
-  const idx = store.sessions.findIndex((s) => s.id === next.id);
-  if (idx >= 0) store.sessions[idx] = next;
-  else store.sessions = [next, ...store.sessions];
-  store.sessions = sortSessionsByLastMessage(
-    store.sessions.filter((s) => hasContent(s.messages)),
-  ).slice(0, MAX_SESSIONS);
-  store.activeSessionId = next.id;
-  const storage = writeStore(store);
+  const storage = await dbSaveSession(next);
   return { session: next, storage };
 }
 
-export function deleteChatSession(id: string): string | null {
-  const store = readStore();
-  store.sessions = store.sessions.filter((s) => s.id !== id);
-  if (store.activeSessionId === id) {
-    store.activeSessionId = store.sessions.find((s) => hasContent(s.messages))?.id ?? null;
-  }
-  writeStore(store);
-  return store.activeSessionId;
+export async function deleteChatSession(id: string): Promise<string | null> {
+  return dbDeleteSession(id);
 }
 
 function startOfDay(ms: number): number {
@@ -196,4 +150,19 @@ export function groupSessionsByDate(sessions: ChatSession[]): { label: string; s
   return order
     .filter((label) => groups.has(label))
     .map((label) => ({ label, sessions: groups.get(label)! }));
+}
+
+export function sessionDayKey(session: ChatSession): string {
+  const d = new Date(lastMessageActivityMs(session));
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+export function formatConversationForExtraction(messages: ChatMessage[]): string {
+  return messages
+    .filter((m) => m.content.trim())
+    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content.trim()}`)
+    .join("\n\n");
 }

@@ -10,12 +10,23 @@ import {
   setActiveChatSession,
   type ChatSession,
 } from "../lib/chatHistory";
+import { ensureChatHistoryMigrated } from "../lib/chatHistoryDb";
 import {
   clearMistralApiKeyPersisted,
   hydrateMistralApiKey,
   loadMistralApiKey,
   saveMistralApiKeyPersisted,
 } from "../lib/mistralApiKey";
+import { buildMemoryContextForQuestion } from "../lib/munshiMemoryRetrieval";
+import {
+  refreshMemoryStatus,
+  runMemoryPipelineNow,
+  tryAutomaticMemoryExtract,
+  subscribeMemoryJobProgress,
+  type MemoryJobProgress,
+} from "../lib/munshiMemoryScheduler";
+import { MEMORY_AUTO_START_DELAY_MS } from "../lib/munshiMemoryTypes";
+import { diagLog } from "../lib/diagnosticsLog";
 import { runPortfolioChatAgent, ChatAbortError } from "../lib/portfolioChatAgent";
 import { completeRunningSteps } from "../lib/agentSteps";
 import type { PortfolioSnapshot } from "../lib/portfolioTools";
@@ -27,49 +38,91 @@ function newId(): string {
 
 function draftSession(): ChatSession {
   const now = new Date().toISOString();
-  return { id: "", title: "New chat", messages: [], createdAt: now, updatedAt: now };
-}
-
-function initChatState(): { session: ChatSession; messages: ChatMessage[]; isDraft: boolean } {
-  const resumed = loadActiveChatSession();
-  if (resumed) return { session: resumed, messages: resumed.messages, isDraft: false };
-  return { session: draftSession(), messages: [], isDraft: true };
+  return { id: "", title: "New chat", messages: [], createdAt: now, updatedAt: now, memoryProcessedAt: null };
 }
 
 export function useMunshiChat() {
-  const bootRef = useRef(initChatState());
+  const [booted, setBooted] = useState(false);
   const [apiKey, setApiKey] = useState(() => loadMistralApiKey());
-  const [session, setSession] = useState<ChatSession>(bootRef.current.session);
-  const [messages, setMessages] = useState<ChatMessage[]>(bootRef.current.messages);
-  const [sessions, setSessions] = useState<ChatSession[]>(() => loadChatSessions());
+  const [session, setSession] = useState<ChatSession>(draftSession());
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
+  const [memoryJob, setMemoryJob] = useState<MemoryJobProgress>({
+    phase: "idle",
+    processedSessions: 0,
+    totalSessions: 0,
+    pendingSessions: 0,
+    lastExtractAt: null,
+    lastAutomaticExtractDay: null,
+    statusMessage: "",
+  });
 
-  const isDraftRef = useRef(bootRef.current.isDraft);
+  const isDraftRef = useRef(true);
   const sessionRef = useRef(session);
   const messagesRef = useRef(messages);
   const abortRef = useRef<AbortController | null>(null);
+  const apiKeyRef = useRef(apiKey);
+  const autoExtractScheduledRef = useRef(false);
 
   sessionRef.current = session;
   messagesRef.current = messages;
+  apiKeyRef.current = apiKey;
 
-  const refreshSessions = useCallback(() => {
-    setSessions(loadChatSessions());
+  const refreshSessions = useCallback(async () => {
+    setSessions(await loadChatSessions());
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      await ensureChatHistoryMigrated();
+      const resumed = await loadActiveChatSession();
+      if (cancelled) return;
+      if (resumed) {
+        isDraftRef.current = false;
+        setSession(resumed);
+        setMessages(resumed.messages);
+        messagesRef.current = resumed.messages;
+      }
+      setSessions(await loadChatSessions());
+      setBooted(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const unsub = subscribeMemoryJobProgress(setMemoryJob);
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    if (!booted || !apiKey.trim() || autoExtractScheduledRef.current) return;
+    autoExtractScheduledRef.current = true;
+    const timer = window.setTimeout(() => {
+      void tryAutomaticMemoryExtract(apiKey).catch(() => {
+        /* status panel shows errors */
+      });
+    }, MEMORY_AUTO_START_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [booted, apiKey]);
+
   const persistToStorage = useCallback(
-    (nextMessages: ChatMessage[], baseSession = sessionRef.current) => {
+    async (nextMessages: ChatMessage[], baseSession = sessionRef.current) => {
       let active = baseSession;
       if (!active.id || isDraftRef.current) {
-        active = createChatSession();
+        active = await createChatSession();
         isDraftRef.current = false;
       }
-      const { session: saved, storage } = saveChatSession(active, nextMessages);
+      const { session: saved, storage } = await saveChatSession(active, nextMessages);
       setSession(saved);
-      refreshSessions();
+      await refreshSessions();
       if (!storage.ok) {
         setStorageError("Could not save chat on this device. Free browser storage or disable private mode.");
       }
@@ -120,21 +173,21 @@ export function useMunshiChat() {
     setInput("");
     setError(null);
     setStreamingId(null);
-    refreshSessions();
+    void refreshSessions();
   }, [busy, refreshSessions]);
 
   const openSession = useCallback(
-    (id: string) => {
+    async (id: string) => {
       if (busy) return;
-      const picked = loadChatSession(id);
+      const picked = await loadChatSession(id);
       if (!picked) return;
       isDraftRef.current = false;
-      setActiveChatSession(id);
+      await setActiveChatSession(id);
       setSession(picked);
       setMessages(picked.messages);
       messagesRef.current = picked.messages;
       setError(null);
-      refreshSessions();
+      await refreshSessions();
     },
     [busy, refreshSessions],
   );
@@ -142,6 +195,20 @@ export function useMunshiChat() {
   const stopGeneration = useCallback(() => {
     abortRef.current?.abort();
   }, []);
+
+  const runMemoryNow = useCallback(async () => {
+    const key = apiKeyRef.current.trim();
+    if (!key) {
+      setError("Add your Mistral API key to run memory extraction.");
+      return;
+    }
+    try {
+      await runMemoryPipelineNow(key);
+      await refreshSessions();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [refreshSessions]);
 
   const runQuestion = useCallback(
     async (
@@ -164,7 +231,7 @@ export function useMunshiChat() {
       const assistantId = newId();
       const withUser = [...history, userMsg];
 
-      persistToStorage(withUser);
+      await persistToStorage(withUser);
 
       const assistantPlaceholder: ChatMessage = { id: assistantId, role: "assistant", content: "" };
       const withAssistant = [...withUser, assistantPlaceholder];
@@ -176,9 +243,19 @@ export function useMunshiChat() {
       const controller = new AbortController();
       abortRef.current = controller;
 
+      let memoryContext = "";
+      try {
+        memoryContext = await buildMemoryContextForQuestion(q);
+        if (memoryContext.trim()) {
+          diagLog("chat", "Memory context injected", { chars: memoryContext.length });
+        }
+      } catch {
+        /* memory retrieval is best-effort */
+      }
+
       try {
         await runPortfolioChatAgent(
-          { question: q, history, apiKey, snapshot, signal: controller.signal },
+          { question: q, history, apiKey, snapshot, signal: controller.signal, memoryContext },
           {
             onDelta: (delta) => {
               flushSync(() => {
@@ -215,14 +292,15 @@ export function useMunshiChat() {
         } else {
           setMessages(withUser);
           messagesRef.current = withUser;
-          persistToStorage(withUser);
+          await persistToStorage(withUser);
           setError(e instanceof Error ? e.message : String(e));
         }
       } finally {
         abortRef.current = null;
         setStreamingId(null);
         setBusy(false);
-        persistToStorage(messagesRef.current);
+        await persistToStorage(messagesRef.current);
+        void refreshMemoryStatus();
       }
     },
     [apiKey, busy, persistToStorage],
@@ -252,7 +330,7 @@ export function useMunshiChat() {
   );
 
   const startEdit = useCallback(
-    (userId: string) => {
+    async (userId: string) => {
       if (busy) return;
       const msgs = messagesRef.current;
       const idx = msgs.findIndex((m) => m.id === userId);
@@ -264,17 +342,20 @@ export function useMunshiChat() {
       messagesRef.current = trimmed;
       setInput(userMsg.content);
       setError(null);
-      persistToStorage(trimmed);
+      await persistToStorage(trimmed);
     },
     [busy, persistToStorage],
   );
 
   useEffect(() => {
+    if (!booted) return;
     const msgs = messagesRef.current;
     if (!msgs.some((m) => m.content.trim())) return;
-    const id = window.setTimeout(() => persistToStorage(msgs), 500);
+    const id = window.setTimeout(() => {
+      void persistToStorage(msgs);
+    }, 500);
     return () => window.clearTimeout(id);
-  }, [messages, persistToStorage]);
+  }, [messages, persistToStorage, booted]);
 
   return {
     apiKey,
@@ -287,6 +368,9 @@ export function useMunshiChat() {
     setInput,
     busy,
     streamingId,
+    booted,
+    memoryJob,
+    runMemoryNow,
     error: error ?? storageError,
     refreshSessions,
     startNewChat,

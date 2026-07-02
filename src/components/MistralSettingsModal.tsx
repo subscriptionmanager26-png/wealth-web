@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 
 import { maskMistralApiKey } from "../lib/mistralApiKey";
+import type { MemoryJobProgress } from "../lib/munshiMemoryScheduler";
+import { MunshiMemoryPanel } from "./MunshiMemoryPanel";
 
 type Props = {
   open: boolean;
@@ -8,9 +10,19 @@ type Props = {
   savedKey: string;
   onSaveKey: (key: string) => boolean | Promise<boolean>;
   onClearKey: () => boolean | Promise<boolean>;
+  memoryJob: MemoryJobProgress;
+  onRunMemoryNow: () => void | Promise<void>;
 };
 
-export function MistralSettingsModal({ open, onClose, savedKey, onSaveKey, onClearKey }: Props) {
+export function MistralSettingsModal({
+  open,
+  onClose,
+  savedKey,
+  onSaveKey,
+  onClearKey,
+  memoryJob,
+  onRunMemoryNow,
+}: Props) {
   const [keyInput, setKeyInput] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -65,8 +77,8 @@ export function MistralSettingsModal({ open, onClose, savedKey, onSaveKey, onCle
         <section className="mistral-settings-section">
           <h3>Mistral API key</h3>
           <p className="text-muted mistral-settings-note">
-            Your key is stored only in this browser (localStorage). It is sent to the server when you chat — never saved
-            on our servers.
+            Your key is stored only in this browser. It is sent to the server when you chat or process memory — never
+            saved on our servers.
           </p>
 
           {savedKey ? (
@@ -101,6 +113,8 @@ export function MistralSettingsModal({ open, onClose, savedKey, onSaveKey, onCle
           </div>
           {error ? <p className="portfolio-chat-error">{error}</p> : null}
         </section>
+
+        <MunshiMemoryPanel memoryJob={memoryJob} onRunMemoryNow={onRunMemoryNow} hasApiKey={Boolean(savedKey)} />
 
         <section className="mistral-settings-section mistral-settings-help">
           <h3>How to get a Mistral API key</h3>

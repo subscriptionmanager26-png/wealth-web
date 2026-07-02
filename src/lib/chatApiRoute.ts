@@ -19,6 +19,10 @@ type ChatProxyBody = {
   stream?: boolean;
   apiKey?: string;
   context?: string;
+  memoryContext?: string;
+  memoryExtract?: boolean;
+  systemPrompt?: string;
+  userContent?: string;
 };
 
 export async function postChatRequest(

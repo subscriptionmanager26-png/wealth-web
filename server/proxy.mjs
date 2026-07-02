@@ -11,6 +11,7 @@ import { corsHeaders, fetchAmfiNavHistory, fetchAmfiPortalNav, fetchNiftyTri } f
 import {
   chatWithMistral,
   mistralChatTurn,
+  mistralMemoryExtract,
   streamChatWithMistral,
   streamMistralChat,
 } from "./mistral.mjs";
@@ -122,9 +123,21 @@ const server = createServer(async (req, res) => {
         apiKey,
       };
       const useTools = payload.tools === true;
+      const memoryContext = typeof payload.memoryContext === "string" ? payload.memoryContext : "";
+
+      if (payload.memoryExtract === true) {
+        const result = await mistralMemoryExtract({
+          systemPrompt: typeof payload.systemPrompt === "string" ? payload.systemPrompt : "",
+          userContent: typeof payload.userContent === "string" ? payload.userContent : "",
+          apiKey,
+        });
+        res.writeHead(200, { ...corsHeaders(origin, ALLOW_ORIGIN), "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+        return;
+      }
 
       if (useTools && payload.stream !== true) {
-        const result = await mistralChatTurn({ ...chatInput, tools: true });
+        const result = await mistralChatTurn({ ...chatInput, tools: true, memoryContext });
         res.writeHead(200, { ...corsHeaders(origin, ALLOW_ORIGIN), "Content-Type": "application/json" });
         res.end(JSON.stringify(result));
         return;
@@ -141,6 +154,7 @@ const server = createServer(async (req, res) => {
           const result = await streamMistralChat({
             messages: chatInput.messages,
             apiKey,
+            memoryContext,
             onChunk: (text) => {
               res.write(`data: ${JSON.stringify({ text })}\n\n`);
             },

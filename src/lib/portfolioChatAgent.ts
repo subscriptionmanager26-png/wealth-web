@@ -46,6 +46,7 @@ type ChatRequest = {
   apiKey?: string;
   snapshot: PortfolioSnapshot;
   signal?: AbortSignal;
+  memoryContext?: string;
 };
 
 export type AgentProgressCallbacks = {
@@ -91,10 +92,15 @@ async function publishSteps(onSteps: AgentProgressCallbacks["onSteps"], steps: A
 async function fetchToolTurn(
   messages: AgentMessage[],
   apiKey: string | undefined,
+  memoryContext: string | undefined,
   signal?: AbortSignal,
 ): Promise<ChatTurnResponse> {
   throwIfAborted(signal);
-  const res = await postChatRequest({ messages, tools: true, stream: false, apiKey }, apiKey, signal);
+  const res = await postChatRequest(
+    { messages, tools: true, stream: false, apiKey, memoryContext },
+    apiKey,
+    signal,
+  );
   const data = (await res.json().catch(() => ({}))) as ChatTurnResponse & { error?: string };
   if (!res.ok) {
     throw new Error(typeof data?.error === "string" ? data.error : `Request failed (${res.status})`);
@@ -105,11 +111,12 @@ async function fetchToolTurn(
 async function streamAgentTurn(
   messages: AgentMessage[],
   apiKey: string | undefined,
+  memoryContext: string | undefined,
   onDelta: (text: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
   throwIfAborted(signal);
-  await streamChatRequest({ messages, tools: true, stream: true, apiKey }, apiKey, (delta) => {
+  await streamChatRequest({ messages, tools: true, stream: true, apiKey, memoryContext }, apiKey, (delta) => {
     throwIfAborted(signal);
     onDelta(delta);
   }, signal);
@@ -130,7 +137,7 @@ async function streamTextGradually(
 
 export async function runPortfolioChatAgent(input: ChatRequest, callbacks: AgentProgressCallbacks): Promise<void> {
   const { onDelta, onSteps } = callbacks;
-  const { signal } = input;
+  const { signal, memoryContext } = input;
   let steps: AgentStep[] = [];
 
   const agentMessages: AgentMessage[] = [
@@ -156,7 +163,7 @@ export async function runPortfolioChatAgent(input: ChatRequest, callbacks: Agent
     await publishSteps(onSteps, steps);
 
     const apiStart = Date.now();
-    const turn = await fetchToolTurn(agentMessages, input.apiKey, signal);
+    const turn = await fetchToolTurn(agentMessages, input.apiKey, memoryContext, signal);
     const apiMs = Date.now() - apiStart;
     const toolCalls = turn.tool_calls ?? turn.message?.tool_calls ?? null;
     const reasoning = (turn.content ?? turn.message?.content ?? "").trim();
@@ -300,7 +307,7 @@ export async function runPortfolioChatAgent(input: ChatRequest, callbacks: Agent
   await publishSteps(onSteps, steps);
 
   let firstDelta = false;
-  await streamAgentTurn(agentMessages, input.apiKey, async (delta) => {
+  await streamAgentTurn(agentMessages, input.apiKey, memoryContext, async (delta) => {
     if (!firstDelta) {
       firstDelta = true;
       await ensureMinStepDuration(writeStart);

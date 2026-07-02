@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { MunshiChatController } from "../hooks/useMunshiChat";
 import type { FundHolding } from "../lib/buildHoldings";
@@ -8,6 +8,7 @@ import type { BenchmarkId, BenchmarkMonthEndPoint } from "@mobile/utils/benchmar
 import type { UpvalySchemeDetail } from "@mobile/utils/upvalyMfApi";
 import type { XRayHoldingRow, XRaySectorRow } from "@mobile/utils/xrayAggregations";
 import type { PortfolioSnapshot } from "../lib/portfolioTools";
+import { buildMetricsIndex, loadScreenerSnapshot, type ScreenerSchemeMetrics } from "../lib/screenerSnapshot";
 import { ChatAgentSteps } from "./ChatAgentSteps";
 import { ChatComposer } from "./ChatComposer";
 import { ChatEmptyState } from "./ChatEmptyState";
@@ -86,7 +87,24 @@ export function PortfolioChatTab({
     stopGeneration,
     regenerate,
     startEdit,
+    memoryJob,
+    runMemoryNow,
   } = chat;
+
+  const [screenerFunds, setScreenerFunds] = useState<Record<string, ScreenerSchemeMetrics>>({});
+  const [screenerGeneratedAt, setScreenerGeneratedAt] = useState<string | undefined>();
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadScreenerSnapshot().then((snap) => {
+      if (cancelled) return;
+      setScreenerFunds(buildMetricsIndex(snap));
+      setScreenerGeneratedAt(snap.generatedAt);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const snapshot = useMemo(
     (): PortfolioSnapshot => ({
@@ -100,6 +118,8 @@ export function PortfolioChatTab({
       assetSlices,
       upvalySchemes,
       benchmarkMonthEnds,
+      screenerFunds,
+      screenerGeneratedAt,
     }),
     [
       portfolioView,
@@ -112,6 +132,8 @@ export function PortfolioChatTab({
       assetSlices,
       upvalySchemes,
       benchmarkMonthEnds,
+      screenerFunds,
+      screenerGeneratedAt,
     ],
   );
 
@@ -259,6 +281,8 @@ export function PortfolioChatTab({
         savedKey={apiKey}
         onSaveKey={saveApiKey}
         onClearKey={clearApiKey}
+        memoryJob={memoryJob}
+        onRunMemoryNow={runMemoryNow}
       />
     </>
   );

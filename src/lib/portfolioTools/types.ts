@@ -4,6 +4,7 @@ import type { PortfolioFundamentalsSnapshot } from "@mobile/utils/portfolioInsig
 import type { BenchmarkId, BenchmarkMonthEndPoint } from "@mobile/utils/benchmarkTypes";
 import type { UpvalySchemeDetail } from "@mobile/utils/upvalyMfApi";
 import type { XRayHoldingRow, XRaySectorRow } from "@mobile/utils/xrayAggregations";
+import type { ScreenerSchemeMetrics } from "../screenerSnapshot";
 
 export type PortfolioHero = {
   total: number;
@@ -25,6 +26,9 @@ export type PortfolioSnapshot = {
   assetSlices?: { type: string; value: number }[];
   upvalySchemes?: Record<string, UpvalySchemeDetail>;
   benchmarkMonthEnds?: Partial<Record<BenchmarkId, BenchmarkMonthEndPoint[]>>;
+  /** Equity Direct Growth universe from screener snapshot (~580 funds), not limited to portfolio. */
+  screenerFunds?: Record<string, ScreenerSchemeMetrics>;
+  screenerGeneratedAt?: string;
 };
 
 export type PortfolioToolName =
@@ -32,11 +36,15 @@ export type PortfolioToolName =
   | "get_portfolio_summary"
   | "get_portfolio_performance"
   | "get_benchmark_comparison"
+  | "list_benchmark_indices"
+  | "get_benchmark_returns"
   | "get_asset_allocation"
   | "get_portfolio_fundamentals"
   | "get_holdings"
   | "get_best_worst_funds"
   | "get_fund_details"
+  | "search_market_funds"
+  | "get_market_fund_details"
   | "get_sector_exposure"
   | "get_stock_exposure"
   | "get_year_wise_returns"
