@@ -1,7 +1,35 @@
 {
   "generatedAt": "2026-07-02T15:58:52.934Z",
   "fetchedAt": "2026-07-02T15:58:52.934Z",
+  "lastAttemptAt": "2026-07-03T18:24:46.126Z",
+  "lastAttemptOk": false,
+  "lastAttemptError": "Nifty TRI fetch failed for NIFTY 50: proxy: Unexpected token '<', \" <!DOCTYPE \"... is not valid JSON (status 200)",
   "source": "https://www.niftyindices.com/Backpage.aspx/getTotalReturnIndexString",
   "indexCount": 21,
-  "fetched": 18
+  "fetched": 18,
+  "refreshed": 0,
+  "reused": 18,
+  "failed": [
+    "nifty50",
+    "nifty100",
+    "nifty200",
+    "nifty500",
+    "nifty_india_fpi_150",
+    "nifty_largemidcap_250",
+    "nifty_microcap_250",
+    "nifty_midcap_100",
+    "nifty_midcap_150",
+    "nifty_midcap_50",
+    "nifty_midcap_select",
+    "nifty_midsmallcap_400",
+    "nifty_midsmallcap_400_5050",
+    "nifty_next_50",
+    "nifty_smallcap_100",
+    "nifty_smallcap_250",
+    "nifty_smallcap_50",
+    "nifty_smallcap_500",
+    "nifty_total_market",
+    "nifty500_largemidsmall_equalcap",
+    "nifty500_multicap_502525"
+  ]
 }
