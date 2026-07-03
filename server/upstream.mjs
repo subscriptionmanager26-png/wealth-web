@@ -1,10 +1,19 @@
 /** Shared upstream fetchers for Nifty TRI + AMFI NAV (dev proxy + serverless). */
 
 export const NIFTY_TRI = "https://www.niftyindices.com/Backpage.aspx/getTotalReturnIndexString";
+export const NIFTY_HISTORICAL_PAGE = "https://www.niftyindices.com/reports/historical-data";
 export const AMFI_NAV = "https://www.amfiindia.com/api/nav-history";
 export const AMFI_PORTAL_NAV = "https://portal.amfiindia.com/DownloadNAVHistoryReport_Po.aspx";
 
+const BROWSER_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
 const proxyStats = { nifty: 0, amfi: 0, portal: 0, windowStart: Date.now() };
+
+/** @type {string | null} */
+let niftySessionCookie = null;
+let niftySessionAt = 0;
+const NIFTY_SESSION_TTL_MS = 10 * 60 * 1000;
 
 function logProxyStats(kind) {
   proxyStats[kind] += 1;
@@ -50,21 +59,110 @@ function normalizeNiftyTriBody(body) {
   return JSON.stringify({ cinfo: raw });
 }
 
-export async function fetchNiftyTri(body) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function cookieHeaderFromResponse(res) {
+  const getSetCookie = res.headers.getSetCookie?.bind(res.headers);
+  const parts = typeof getSetCookie === "function" ? getSetCookie() : [];
+  if (parts.length) {
+    return parts.map((c) => c.split(";")[0]?.trim()).filter(Boolean).join("; ");
+  }
+  const single = res.headers.get("set-cookie");
+  if (!single) return null;
+  return single
+    .split(/,(?=[^;]+?=)/)
+    .map((c) => c.split(";")[0]?.trim())
+    .filter(Boolean)
+    .join("; ");
+}
+
+async function warmNiftySession(force = false) {
+  if (!force && niftySessionCookie && Date.now() - niftySessionAt < NIFTY_SESSION_TTL_MS) {
+    return niftySessionCookie;
+  }
+  try {
+    const res = await fetch(NIFTY_HISTORICAL_PAGE, {
+      method: "GET",
+      headers: {
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": BROWSER_UA,
+      },
+      signal: AbortSignal.timeout(30000),
+      redirect: "follow",
+    });
+    const cookie = cookieHeaderFromResponse(res);
+    if (cookie) {
+      niftySessionCookie = cookie;
+      niftySessionAt = Date.now();
+      return cookie;
+    }
+  } catch {
+    /* warm-up is best-effort */
+  }
+  return niftySessionCookie;
+}
+
+function niftyHeaders(cookie) {
+  const headers = {
+    Accept: "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Content-Type": "application/json; charset=UTF-8",
+    Origin: "https://www.niftyindices.com",
+    Referer: NIFTY_HISTORICAL_PAGE,
+    "User-Agent": BROWSER_UA,
+    "X-Requested-With": "XMLHttpRequest",
+  };
+  if (cookie) headers.Cookie = cookie;
+  return headers;
+}
+
+/**
+ * POST to Nifty TRI with browser-like headers, session warm-up, and retries.
+ * Nifty intermittently returns 403 / times out for datacenter IPs (e.g. GitHub Actions).
+ */
+export async function fetchNiftyTri(body, options = {}) {
   logProxyStats("nifty");
   const postBody = normalizeNiftyTriBody(body);
-  return fetch(NIFTY_TRI, {
-    method: "POST",
-    headers: {
-      Accept: "application/json, text/javascript, */*; q=0.01",
-      "Content-Type": "application/json; charset=UTF-8",
-      Origin: "https://www.niftyindices.com",
-      Referer: "https://www.niftyindices.com/reports/historical-data",
-      "X-Requested-With": "XMLHttpRequest",
-    },
-    body: postBody,
-    signal: AbortSignal.timeout(60000),
-  });
+  const maxAttempts = options.retries ?? 4;
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const cookie = await warmNiftySession(attempt > 1);
+    try {
+      const res = await fetch(NIFTY_TRI, {
+        method: "POST",
+        headers: niftyHeaders(cookie),
+        body: postBody,
+        signal: AbortSignal.timeout(options.timeoutMs ?? 90000),
+      });
+
+      if (res.ok) return res;
+
+      const retryable = res.status === 403 || res.status === 429 || res.status >= 500;
+      if (!retryable || attempt === maxAttempts) return res;
+
+      niftySessionCookie = null;
+      niftySessionAt = 0;
+      const waitMs = Math.min(15_000, 1500 * 2 ** (attempt - 1));
+      console.warn(`[nifty] attempt ${attempt}/${maxAttempts} got ${res.status}, retrying in ${waitMs}ms`);
+      await sleep(waitMs);
+    } catch (e) {
+      lastError = e;
+      niftySessionCookie = null;
+      niftySessionAt = 0;
+      if (attempt === maxAttempts) throw e;
+      const waitMs = Math.min(15_000, 1500 * 2 ** (attempt - 1));
+      console.warn(
+        `[nifty] attempt ${attempt}/${maxAttempts} error: ${e instanceof Error ? e.message : e}, retrying in ${waitMs}ms`,
+      );
+      await sleep(waitMs);
+    }
+  }
+
+  throw lastError ?? new Error("Nifty TRI fetch failed");
 }
 
 export async function fetchAmfiNavHistory(searchParams) {
@@ -73,7 +171,7 @@ export async function fetchAmfiNavHistory(searchParams) {
   return fetch(`${AMFI_NAV}?${qs}`, {
     headers: {
       Accept: "application/json",
-      "User-Agent": "Mozilla/5.0 (compatible; portfolio-web/1.0)",
+      "User-Agent": BROWSER_UA,
     },
     signal: AbortSignal.timeout(30000),
   });
@@ -84,7 +182,7 @@ export async function fetchAmfiPortalNav(frmdt) {
   return fetch(`${AMFI_PORTAL_NAV}?frmdt=${encodeURIComponent(frmdt)}`, {
     headers: {
       Accept: "text/plain,*/*",
-      "User-Agent": "Mozilla/5.0 (compatible; portfolio-web/1.0)",
+      "User-Agent": BROWSER_UA,
     },
     signal: AbortSignal.timeout(30000),
   });

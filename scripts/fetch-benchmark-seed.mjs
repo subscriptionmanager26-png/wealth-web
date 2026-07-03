@@ -1,8 +1,14 @@
 /**
  * Fetches full Nifty TRI history for bundled benchmark seed (CI / manual refresh).
  * Run: npm run fetch-benchmark-seed
+ *
+ * Resilience:
+ * - Browser-like headers + session warm-up + retries (see server/upstream.mjs)
+ * - Optional proxy fallback via NIFTY_TRI_PROXY_URL (e.g. production /api/nifty/tri)
+ * - Per-index failures do not abort the whole run
+ * - Keeps previous seed points for indices that fail to refresh
  */
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,6 +22,9 @@ const PUBLIC_JSON = path.resolve(root, "public/benchmark-seed.json");
 const PUBLIC_META = path.resolve(root, "public/benchmark-seed-meta.json");
 
 const NIFTY_TRI = "https://www.niftyindices.com/Backpage.aspx/getTotalReturnIndexString";
+/** Production proxy — different egress IP than GitHub Actions (helps when Nifty returns 403). */
+const DEFAULT_PROXY = "https://wealth-web-zeta.vercel.app/api/nifty/tri";
+const PROXY_URL = (process.env.NIFTY_TRI_PROXY_URL ?? DEFAULT_PROXY).trim();
 
 const BENCHMARK_INDEXES = [
   { id: "nifty50", apiName: "NIFTY 50" },
@@ -44,6 +53,7 @@ const BENCHMARK_INDEXES = [
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const START = new Date(2000, 0, 1, 12, 0, 0, 0);
 const END = new Date();
+const MIN_POINTS = 100;
 
 function formatNiftyApiDate(d) {
   const dd = String(d.getDate()).padStart(2, "0");
@@ -67,20 +77,21 @@ function parseTriValue(s) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-async function fetchIndex(indexName) {
-  const cinfo = JSON.stringify({
-    name: indexName,
-    startDate: formatNiftyApiDate(START),
-    endDate: formatNiftyApiDate(END),
-    indexName,
-  });
+function loadExistingSeed() {
+  for (const p of [OUT_JSON, PUBLIC_JSON]) {
+    if (!existsSync(p)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(p, "utf8"));
+      if (parsed?.indices && typeof parsed.indices === "object") return parsed;
+    } catch {
+      /* ignore */
+    }
+  }
+  return { version: 1, generatedAt: null, indices: {} };
+}
 
-  const res = await fetchNiftyTri(cinfo);
-  if (!res.ok) throw new Error(`Nifty TRI fetch failed (${res.status}) for ${indexName}`);
-
-  const payload = await res.json();
-  if (!payload.d) return [];
-
+function parseTriPayload(payload) {
+  if (!payload?.d) return [];
   let rows;
   try {
     rows = JSON.parse(payload.d);
@@ -102,22 +113,157 @@ async function fetchIndex(indexName) {
     .sort((a, b) => a[0] - b[0]);
 }
 
+async function fetchViaProxy(postBody) {
+  if (!PROXY_URL) return null;
+  const res = await fetch(PROXY_URL, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json; charset=UTF-8",
+    },
+    body: postBody,
+    signal: AbortSignal.timeout(120000),
+  });
+  return res;
+}
+
+async function fetchIndex(indexName) {
+  const cinfo = JSON.stringify({
+    name: indexName,
+    startDate: formatNiftyApiDate(START),
+    endDate: formatNiftyApiDate(END),
+    indexName,
+  });
+  const postBody = JSON.stringify({ cinfo });
+
+  let lastStatus = null;
+  let lastError = null;
+
+  // 1) Direct Nifty (with retries inside fetchNiftyTri)
+  try {
+    const res = await fetchNiftyTri(postBody, { retries: 3, timeoutMs: 45000 });
+    lastStatus = res.status;
+    if (res.ok) {
+      const points = parseTriPayload(await res.json());
+      if (points.length >= MIN_POINTS) return { points, source: "direct" };
+      lastError = `too few points (${points.length})`;
+    } else {
+      lastError = `HTTP ${res.status}`;
+    }
+  } catch (e) {
+    lastError = e instanceof Error ? e.message : String(e);
+  }
+
+  // 2) Production proxy fallback (different egress IP than GitHub Actions)
+  if (PROXY_URL) {
+    console.warn(`  direct failed (${lastError}); trying proxy ${PROXY_URL}`);
+    try {
+      const res = await fetchViaProxy(postBody);
+      lastStatus = res?.status ?? lastStatus;
+      if (res?.ok) {
+        const points = parseTriPayload(await res.json());
+        if (points.length >= MIN_POINTS) return { points, source: "proxy" };
+        lastError = `proxy too few points (${points.length})`;
+      } else {
+        lastError = `proxy HTTP ${res?.status}`;
+      }
+    } catch (e) {
+      lastError = `proxy: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  throw new Error(`Nifty TRI fetch failed for ${indexName}: ${lastError}${lastStatus ? ` (status ${lastStatus})` : ""}`);
+}
+
+function keepPrevious(indices, existing, id, failures, apiName, msg) {
+  failures.push({ id, apiName, error: msg });
+  const prev = existing.indices?.[id];
+  if (Array.isArray(prev) && prev.length >= MIN_POINTS) {
+    indices[id] = prev;
+    console.warn(`  FAILED — kept previous ${prev.length} points. ${msg}`);
+    return 1;
+  }
+  indices[id] = Array.isArray(prev) ? prev : [];
+  console.warn(`  FAILED — no usable previous data. ${msg}`);
+  return 0;
+}
+
 async function main() {
-  const indices = {};
-  let fetched = 0;
+  const existing = loadExistingSeed();
+  const indices = { ...existing.indices };
+  let refreshed = 0;
+  let reused = 0;
+  const failures = [];
+  /** Stop hammering Nifty after consecutive hard failures (403 / timeout / proxy down). */
+  const CIRCUIT_BREAK_AFTER = 2;
+  let consecutiveFailures = 0;
+  let circuitOpen = false;
 
   for (let i = 0; i < BENCHMARK_INDEXES.length; i += 1) {
     const { id, apiName } = BENCHMARK_INDEXES[i];
-    console.log(`Fetching ${apiName}…`);
-    const points = await fetchIndex(apiName);
-    indices[id] = points;
-    if (points.length) fetched += 1;
-    console.log(
-      `  ${points.length} daily points (${points[0] ? new Date(points[0][0]).toISOString().slice(0, 10) : "?"} → ${points.at(-1) ? new Date(points.at(-1)[0]).toISOString().slice(0, 10) : "?"})`,
-    );
-    if (i < BENCHMARK_INDEXES.length - 1) {
-      await new Promise((r) => setTimeout(r, 400));
+
+    if (circuitOpen) {
+      reused += keepPrevious(indices, existing, id, failures, apiName, "skipped (circuit open — Nifty unreachable)");
+      continue;
     }
+
+    console.log(`Fetching ${apiName}…`);
+    try {
+      const { points, source } = await fetchIndex(apiName);
+      indices[id] = points;
+      refreshed += 1;
+      consecutiveFailures = 0;
+      console.log(
+        `  ${points.length} daily points via ${source} (${points[0] ? new Date(points[0][0]).toISOString().slice(0, 10) : "?"} → ${points.at(-1) ? new Date(points.at(-1)[0]).toISOString().slice(0, 10) : "?"})`,
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      reused += keepPrevious(indices, existing, id, failures, apiName, msg);
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= CIRCUIT_BREAK_AFTER) {
+        circuitOpen = true;
+        console.warn(
+          `Circuit open after ${consecutiveFailures} consecutive failures — keeping previous seed for remaining indices.`,
+        );
+      }
+    }
+    if (!circuitOpen && i < BENCHMARK_INDEXES.length - 1) {
+      await new Promise((r) => setTimeout(r, 600));
+    }
+  }
+
+  const withData = Object.values(indices).filter((p) => Array.isArray(p) && p.length >= MIN_POINTS).length;
+  if (withData === 0) {
+    throw new Error(
+      `No benchmark indices have usable data (refreshed=${refreshed}, failures=${failures.length}). Nifty may be blocking this network.`,
+    );
+  }
+
+  // Nifty often blocks datacenter IPs (403 / timeout). If every fetch failed but we still have a
+  // usable prior seed, keep it and exit successfully so CI stays green.
+  if (refreshed === 0) {
+    console.warn(
+      `All ${failures.length} index fetches failed; keeping existing seed (${withData} indices). First error: ${failures[0]?.error}`,
+    );
+    const attemptMeta = {
+      generatedAt: existing.generatedAt ?? new Date().toISOString(),
+      fetchedAt: existing.generatedAt ?? new Date().toISOString(),
+      lastAttemptAt: new Date().toISOString(),
+      lastAttemptOk: false,
+      lastAttemptError: failures[0]?.error ?? "unknown",
+      source: NIFTY_TRI,
+      indexCount: BENCHMARK_INDEXES.length,
+      fetched: withData,
+      refreshed: 0,
+      reused: withData,
+      failed: failures.map((f) => f.id),
+    };
+    const metaJson = JSON.stringify(attemptMeta, null, 2);
+    mkdirSync(path.dirname(OUT_META), { recursive: true });
+    writeFileSync(OUT_META, metaJson);
+    writeFileSync(PUBLIC_META, metaJson);
+    console.log(`Wrote attempt meta only (seed unchanged): ${OUT_META}`);
+    return;
   }
 
   const generatedAt = new Date().toISOString();
@@ -132,9 +278,14 @@ async function main() {
   const meta = {
     generatedAt,
     fetchedAt: generatedAt,
+    lastAttemptAt: generatedAt,
+    lastAttemptOk: true,
     source: NIFTY_TRI,
     indexCount: BENCHMARK_INDEXES.length,
-    fetched,
+    fetched: withData,
+    refreshed,
+    reused,
+    failed: failures.map((f) => f.id),
   };
   const metaJson = JSON.stringify(meta, null, 2);
   writeFileSync(OUT_META, metaJson);
@@ -142,6 +293,10 @@ async function main() {
 
   console.log(`Wrote ${OUT_JSON} (${(Buffer.byteLength(json) / 1024).toFixed(1)} KB)`);
   console.log(`Wrote ${OUT_META}`);
+  console.log(`Summary: refreshed=${refreshed}, reused=${reused}, withData=${withData}, failed=${failures.length}`);
+  if (failures.length) {
+    console.warn("Failed indices:", failures.map((f) => f.id).join(", "));
+  }
 }
 
 main().catch((e) => {

@@ -21,7 +21,11 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
+      # Nifty often returns 403 to GitHub Actions IPs. Direct fetch retries first;
+      # on failure the script falls back to the production Vercel proxy (different egress).
       - name: Fetch Nifty TRI benchmark seed
+        env:
+          NIFTY_TRI_PROXY_URL: https://wealth-web-zeta.vercel.app/api/nifty/tri
         run: npm run fetch-benchmark-seed
 
       - name: Commit benchmark seed
