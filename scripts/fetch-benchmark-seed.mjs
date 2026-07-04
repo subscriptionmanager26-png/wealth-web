@@ -3,13 +3,13 @@
  * Run: npm run fetch-benchmark-seed
  *
  * Resilience:
- * 1. niftyindices.com TRI API (browser headers + retries + optional Vercel proxy)
- * 2. If TRI is blocked (Akamai serves homepage HTML), extend existing seed using
- *    NSE daily index close archives (price returns applied to last TRI level)
- * 3. If nothing new, keep previous seed and exit 0
+ * 1. niftyindices.com TRI API at /BackPage/getTotalReturnIndexString (not legacy .aspx)
+ * 2. Optional Vercel proxy fallback
+ * 3. If TRI still fails, extend existing seed via NSE daily price archives
+ * 4. If nothing new, keep previous seed and exit 0
  *
- * Why TRI fails: niftyindices.com sits behind Akamai Bot Manager. Automated POSTs
- * get HTTP 200 with the marketing homepage HTML instead of JSON — not a private-repo issue.
+ * Note: the legacy path /Backpage.aspx/getTotalReturnIndexString returns homepage HTML
+ * to non-browser clients. The live path is /BackPage/getTotalReturnIndexString (JSON array).
  */
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import path from "node:path";
@@ -24,7 +24,7 @@ const OUT_META = path.resolve(root, "assets/benchmark-seed-meta.json");
 const PUBLIC_JSON = path.resolve(root, "public/benchmark-seed.json");
 const PUBLIC_META = path.resolve(root, "public/benchmark-seed-meta.json");
 
-const NIFTY_TRI = "https://www.niftyindices.com/Backpage.aspx/getTotalReturnIndexString";
+const NIFTY_TRI = "https://www.niftyindices.com/BackPage/getTotalReturnIndexString";
 /** Production proxy — different egress IP than GitHub Actions (helps when Nifty returns 403). */
 const DEFAULT_PROXY = "https://wealth-web-zeta.vercel.app/api/nifty/tri";
 const PROXY_URL = (process.env.NIFTY_TRI_PROXY_URL ?? DEFAULT_PROXY).trim();
@@ -102,12 +102,16 @@ function loadExistingSeed() {
 }
 
 function parseTriPayload(payload) {
-  if (!payload?.d) return [];
-  let rows;
-  try {
-    rows = JSON.parse(payload.d);
-  } catch {
-    return [];
+  // New BackPage endpoint returns a JSON array; legacy .aspx returned { d: "<json array>" }.
+  let rows = [];
+  if (Array.isArray(payload)) {
+    rows = payload;
+  } else if (payload && typeof payload.d === "string") {
+    try {
+      rows = JSON.parse(payload.d);
+    } catch {
+      return [];
+    }
   }
   if (!Array.isArray(rows)) return [];
 
@@ -150,17 +154,29 @@ async function fetchIndex(indexName) {
   let lastStatus = null;
   let lastError = null;
 
+  async function readTriResponse(res, label) {
+    const text = await res.text();
+    if (!res.ok) throw new Error(`${label} HTTP ${res.status}`);
+    if (text.trim().startsWith("<") || text.includes("<!DOCTYPE")) {
+      throw new Error(`${label} HTML block (wrong endpoint or WAF)`);
+    }
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch (e) {
+      throw new Error(`${label} invalid JSON: ${e instanceof Error ? e.message : e}`);
+    }
+    const points = parseTriPayload(payload);
+    if (points.length < MIN_POINTS) throw new Error(`${label} too few points (${points.length})`);
+    return points;
+  }
+
   // 1) Direct Nifty (with retries inside fetchNiftyTri)
   try {
     const res = await fetchNiftyTri(postBody, { retries: 3, timeoutMs: 45000 });
     lastStatus = res.status;
-    if (res.ok) {
-      const points = parseTriPayload(await res.json());
-      if (points.length >= MIN_POINTS) return { points, source: "direct" };
-      lastError = `too few points (${points.length})`;
-    } else {
-      lastError = `HTTP ${res.status}`;
-    }
+    const points = await readTriResponse(res, "direct");
+    return { points, source: "direct" };
   } catch (e) {
     lastError = e instanceof Error ? e.message : String(e);
   }
@@ -171,15 +187,10 @@ async function fetchIndex(indexName) {
     try {
       const res = await fetchViaProxy(postBody);
       lastStatus = res?.status ?? lastStatus;
-      if (res?.ok) {
-        const points = parseTriPayload(await res.json());
-        if (points.length >= MIN_POINTS) return { points, source: "proxy" };
-        lastError = `proxy too few points (${points.length})`;
-      } else {
-        lastError = `proxy HTTP ${res?.status}`;
-      }
+      const points = await readTriResponse(res, "proxy");
+      return { points, source: "proxy" };
     } catch (e) {
-      lastError = `proxy: ${e instanceof Error ? e.message : String(e)}`;
+      lastError = e instanceof Error ? e.message : String(e);
     }
   }
 

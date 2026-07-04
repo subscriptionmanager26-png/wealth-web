@@ -1,6 +1,7 @@
 /** Shared upstream fetchers for Nifty TRI + AMFI NAV (dev proxy + serverless). */
 
-export const NIFTY_TRI = "https://www.niftyindices.com/Backpage.aspx/getTotalReturnIndexString";
+/** Live endpoint (not the legacy Backpage.aspx path — that returns homepage HTML to bots). */
+export const NIFTY_TRI = "https://www.niftyindices.com/BackPage/getTotalReturnIndexString";
 export const NIFTY_HISTORICAL_PAGE = "https://www.niftyindices.com/reports/historical-data";
 export const AMFI_NAV = "https://www.amfiindia.com/api/nav-history";
 export const AMFI_PORTAL_NAV = "https://portal.amfiindia.com/DownloadNAVHistoryReport_Po.aspx";
@@ -108,7 +109,7 @@ async function warmNiftySession(force = false) {
 function niftyHeaders(cookie) {
   const headers = {
     Accept: "application/json, text/javascript, */*; q=0.01",
-    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Language": "en-US,en;q=0.9,hi;q=0.8",
     "Content-Type": "application/json; charset=UTF-8",
     Origin: "https://www.niftyindices.com",
     Referer: NIFTY_HISTORICAL_PAGE,
@@ -117,6 +118,12 @@ function niftyHeaders(cookie) {
   };
   if (cookie) headers.Cookie = cookie;
   return headers;
+}
+
+/** True when Akamai/WAF returned an HTML page instead of TRI JSON. */
+export function isNiftyHtmlBlockResponse(text) {
+  const t = String(text ?? "").trim();
+  return t.startsWith("<") || t.includes("<!DOCTYPE");
 }
 
 /**

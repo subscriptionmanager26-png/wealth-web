@@ -61,14 +61,20 @@ export async function fetchNiftyTotalReturnIndex(
     throw new Error(`Nifty TRI fetch failed (${res.status}) for ${indexName}`);
   }
 
-  const payload = (await res.json()) as { d?: string };
-  if (!payload.d) return [];
-
-  let rows: NiftyTriRow[];
-  try {
-    rows = JSON.parse(payload.d) as NiftyTriRow[];
-  } catch {
-    return [];
+  const text = await res.text();
+  if (text.trim().startsWith("<")) {
+    throw new Error(`Nifty TRI returned HTML for ${indexName}`);
+  }
+  const payload = JSON.parse(text) as NiftyTriRow[] | { d?: string };
+  // BackPage returns a JSON array; legacy .aspx returned { d: "<json array>" }.
+  let rows: NiftyTriRow[] = [];
+  if (Array.isArray(payload)) rows = payload;
+  else if (payload?.d) {
+    try {
+      rows = JSON.parse(payload.d) as NiftyTriRow[];
+    } catch {
+      return [];
+    }
   }
   if (!Array.isArray(rows)) return [];
 
