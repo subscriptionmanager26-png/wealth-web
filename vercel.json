@@ -10,6 +10,8 @@
     }
   },
   "rewrites": [
+    { "source": "/api/broker", "destination": "/api/broker?__path=" },
+    { "source": "/api/broker/:path*", "destination": "/api/broker?__path=:path*" },
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ],
   "headers": [
