@@ -3,10 +3,13 @@
  * Run: npm run fetch-benchmark-seed
  *
  * Resilience:
- * - Browser-like headers + session warm-up + retries (see server/upstream.mjs)
- * - Optional proxy fallback via NIFTY_TRI_PROXY_URL (e.g. production /api/nifty/tri)
- * - Per-index failures do not abort the whole run
- * - Keeps previous seed points for indices that fail to refresh
+ * 1. niftyindices.com TRI API (browser headers + retries + optional Vercel proxy)
+ * 2. If TRI is blocked (Akamai serves homepage HTML), extend existing seed using
+ *    NSE daily index close archives (price returns applied to last TRI level)
+ * 3. If nothing new, keep previous seed and exit 0
+ *
+ * Why TRI fails: niftyindices.com sits behind Akamai Bot Manager. Automated POSTs
+ * get HTTP 200 with the marketing homepage HTML instead of JSON — not a private-repo issue.
  */
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import path from "node:path";
@@ -27,28 +30,36 @@ const DEFAULT_PROXY = "https://wealth-web-zeta.vercel.app/api/nifty/tri";
 const PROXY_URL = (process.env.NIFTY_TRI_PROXY_URL ?? DEFAULT_PROXY).trim();
 
 const BENCHMARK_INDEXES = [
-  { id: "nifty50", apiName: "NIFTY 50" },
-  { id: "nifty100", apiName: "NIFTY 100" },
-  { id: "nifty200", apiName: "NIFTY 200" },
-  { id: "nifty500", apiName: "NIFTY 500" },
-  { id: "nifty_india_fpi_150", apiName: "NIFTY INDIA FPI 150" },
-  { id: "nifty_largemidcap_250", apiName: "NIFTY LARGEMIDCAP 250" },
-  { id: "nifty_microcap_250", apiName: "NIFTY MICROCAP 250" },
-  { id: "nifty_midcap_100", apiName: "NIFTY MIDCAP 100" },
-  { id: "nifty_midcap_150", apiName: "NIFTY MIDCAP 150" },
-  { id: "nifty_midcap_50", apiName: "NIFTY MIDCAP 50" },
-  { id: "nifty_midcap_select", apiName: "NIFTY MIDCAP SELECT" },
-  { id: "nifty_midsmallcap_400", apiName: "NIFTY MIDSMALLCAP 400" },
-  { id: "nifty_midsmallcap_400_5050", apiName: "NIFTY MIDSMALLCAP400 50:50" },
-  { id: "nifty_next_50", apiName: "NIFTY NEXT 50" },
-  { id: "nifty_smallcap_100", apiName: "NIFTY SMALLCAP 100" },
-  { id: "nifty_smallcap_250", apiName: "NIFTY SMALLCAP 250" },
-  { id: "nifty_smallcap_50", apiName: "NIFTY SMALLCAP 50" },
-  { id: "nifty_smallcap_500", apiName: "NIFTY SMALLCAP 500" },
-  { id: "nifty_total_market", apiName: "NIFTY TOTAL MARKET" },
-  { id: "nifty500_largemidsmall_equalcap", apiName: "NIFTY500 LARGEMIDSMALL EQUAL-CAP WEIGHTED" },
-  { id: "nifty500_multicap_502525", apiName: "NIFTY500 MULTICAP 50:25:25" },
+  { id: "nifty50", apiName: "NIFTY 50", nseName: "Nifty 50" },
+  { id: "nifty100", apiName: "NIFTY 100", nseName: "Nifty 100" },
+  { id: "nifty200", apiName: "NIFTY 200", nseName: "Nifty 200" },
+  { id: "nifty500", apiName: "NIFTY 500", nseName: "Nifty 500" },
+  { id: "nifty_india_fpi_150", apiName: "NIFTY INDIA FPI 150", nseName: "Nifty India FPI 150" },
+  { id: "nifty_largemidcap_250", apiName: "NIFTY LARGEMIDCAP 250", nseName: "NIFTY LargeMidcap 250" },
+  { id: "nifty_microcap_250", apiName: "NIFTY MICROCAP 250", nseName: "Nifty Microcap 250" },
+  { id: "nifty_midcap_100", apiName: "NIFTY MIDCAP 100", nseName: "NIFTY Midcap 100" },
+  { id: "nifty_midcap_150", apiName: "NIFTY MIDCAP 150", nseName: "Nifty Midcap 150" },
+  { id: "nifty_midcap_50", apiName: "NIFTY MIDCAP 50", nseName: "Nifty Midcap 50" },
+  { id: "nifty_midcap_select", apiName: "NIFTY MIDCAP SELECT", nseName: "Nifty Midcap Select" },
+  { id: "nifty_midsmallcap_400", apiName: "NIFTY MIDSMALLCAP 400", nseName: "Nifty MidSmallcap 400" },
+  { id: "nifty_midsmallcap_400_5050", apiName: "NIFTY MIDSMALLCAP400 50:50", nseName: "Nifty MidSmallcap400 50:50" },
+  { id: "nifty_next_50", apiName: "NIFTY NEXT 50", nseName: "Nifty Next 50" },
+  { id: "nifty_smallcap_100", apiName: "NIFTY SMALLCAP 100", nseName: "NIFTY Smallcap 100" },
+  { id: "nifty_smallcap_250", apiName: "NIFTY SMALLCAP 250", nseName: "Nifty Smallcap 250" },
+  { id: "nifty_smallcap_50", apiName: "NIFTY SMALLCAP 50", nseName: "Nifty Smallcap 50" },
+  { id: "nifty_smallcap_500", apiName: "NIFTY SMALLCAP 500", nseName: "Nifty Smallcap 500" },
+  { id: "nifty_total_market", apiName: "NIFTY TOTAL MARKET", nseName: "Nifty Total Market" },
+  {
+    id: "nifty500_largemidsmall_equalcap",
+    apiName: "NIFTY500 LARGEMIDSMALL EQUAL-CAP WEIGHTED",
+    nseName: "Nifty500 LargeMidSmall Equal-Cap Weighted",
+  },
+  { id: "nifty500_multicap_502525", apiName: "NIFTY500 MULTICAP 50:25:25", nseName: "Nifty500 Multicap 50:25:25" },
 ];
+
+const NSE_ARCHIVE = "https://archives.nseindia.com/content/indices/ind_close_all_";
+const NSE_LOOKBACK_DAYS = 21;
+const UA = "Mozilla/5.0 (compatible; wealth-web-benchmark-seed/1.0)";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const START = new Date(2000, 0, 1, 12, 0, 0, 0);
@@ -188,6 +199,148 @@ function keepPrevious(indices, existing, id, failures, apiName, msg) {
   return 0;
 }
 
+function formatNseArchiveDate(d) {
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  return `${dd}${mm}${yyyy}`;
+}
+
+function parseNseCsvDate(s) {
+  const m = String(s ?? "")
+    .trim()
+    .match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (!m) return null;
+  return new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]), 12, 0, 0, 0);
+}
+
+function dayKeyFromMs(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function dayKeyFromDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function noonMsFromDayKey(dayKey) {
+  const [y, m, d] = dayKey.split("-").map(Number);
+  return new Date(y, m - 1, d, 12, 0, 0, 0).getTime();
+}
+
+/** Fetch one NSE daily index-close CSV. Returns Map<lowerName, {dayKey, close}>. */
+async function fetchNseArchiveDay(date) {
+  const url = `${NSE_ARCHIVE}${formatNseArchiveDate(date)}.csv`;
+  const res = await fetch(url, {
+    headers: { "User-Agent": UA, Accept: "text/csv,*/*" },
+    signal: AbortSignal.timeout(20000),
+  });
+  if (!res.ok) return null;
+  const text = await res.text();
+  if (!text.includes("Index Name") || text.trim().startsWith("<")) return null;
+
+  const out = new Map();
+  const lines = text.split(/\r?\n/).filter((l) => l.trim());
+  for (let i = 1; i < lines.length; i += 1) {
+    const cols = lines[i].split(",");
+    if (cols.length < 6) continue;
+    const name = (cols[0] ?? "").trim();
+    const dateObj = parseNseCsvDate(cols[1]);
+    const close = Number(String(cols[5] ?? "").replace(/,/g, ""));
+    if (!name || !dateObj || !Number.isFinite(close) || close <= 0) continue;
+    out.set(name.toLowerCase(), { dayKey: dayKeyFromDate(dateObj), close });
+  }
+  return out;
+}
+
+/**
+ * When TRI API is blocked, extend existing TRI-denominated series using NSE price-index
+ * daily returns: tri[t] = tri[t-1] * (price[t] / price[t-1]).
+ * Short gaps are fine; on ex-dividend days TRI would be slightly higher than this proxy.
+ */
+async function extendSeedFromNseArchives(existingIndices) {
+  console.log(`TRI blocked — extending seed via NSE archives (last ${NSE_LOOKBACK_DAYS} days)…`);
+  const byDay = [];
+  const today = new Date();
+  for (let i = 0; i < NSE_LOOKBACK_DAYS; i += 1) {
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i, 12, 0, 0, 0);
+    try {
+      const map = await fetchNseArchiveDay(d);
+      if (map?.size) {
+        byDay.push({ dayKey: dayKeyFromDate(d), map });
+        console.log(`  NSE archive ${formatNseArchiveDate(d)}: ${map.size} indices`);
+      }
+    } catch (e) {
+      console.warn(`  NSE archive ${formatNseArchiveDate(d)} failed:`, e instanceof Error ? e.message : e);
+    }
+    await new Promise((r) => setTimeout(r, 120));
+  }
+  byDay.sort((a, b) => a.dayKey.localeCompare(b.dayKey));
+  if (byDay.length < 2) {
+    return { indices: existingIndices, extended: 0, days: byDay.length };
+  }
+
+  const priceById = new Map();
+  for (const { id, nseName } of BENCHMARK_INDEXES) {
+    const series = new Map();
+    const key = nseName.toLowerCase();
+    for (const day of byDay) {
+      const row = day.map.get(key);
+      if (row) series.set(row.dayKey, row.close);
+    }
+    priceById.set(id, series);
+  }
+
+  const next = { ...existingIndices };
+  let extended = 0;
+
+  for (const { id } of BENCHMARK_INDEXES) {
+    const prev = Array.isArray(existingIndices[id]) ? [...existingIndices[id]] : [];
+    if (prev.length < MIN_POINTS) continue;
+    prev.sort((a, b) => a[0] - b[0]);
+    const prices = priceById.get(id);
+    if (!prices?.size) continue;
+
+    let lastT = prev[prev.length - 1][0];
+    let lastTri = prev[prev.length - 1][1];
+    let lastDay = dayKeyFromMs(lastT);
+    let lastPrice = prices.get(lastDay);
+    if (lastPrice == null) {
+      const sortedDays = [...prices.keys()].sort();
+      for (let i = sortedDays.length - 1; i >= 0; i -= 1) {
+        if (sortedDays[i] <= lastDay) {
+          lastPrice = prices.get(sortedDays[i]);
+          lastDay = sortedDays[i];
+          break;
+        }
+      }
+    }
+    if (lastPrice == null || lastPrice <= 0) continue;
+
+    let added = 0;
+    for (const dayKey of [...prices.keys()].sort()) {
+      if (dayKey <= lastDay) continue;
+      const price = prices.get(dayKey);
+      if (price == null || price <= 0 || lastPrice <= 0) continue;
+      const newTri = Math.round(lastTri * (price / lastPrice) * 100) / 100;
+      const t = noonMsFromDayKey(dayKey);
+      prev.push([t, newTri]);
+      lastT = t;
+      lastTri = newTri;
+      lastPrice = price;
+      lastDay = dayKey;
+      added += 1;
+    }
+    if (added > 0) {
+      next[id] = prev;
+      extended += 1;
+      console.log(`  ${id}: +${added} day(s) via NSE price returns → ${lastDay} @ ${lastTri}`);
+    }
+  }
+
+  return { indices: next, extended, days: byDay.length };
+}
+
 async function main() {
   const existing = loadExistingSeed();
   const indices = { ...existing.indices };
@@ -239,12 +392,48 @@ async function main() {
     );
   }
 
-  // Nifty often blocks datacenter IPs (403 / timeout). If every fetch failed but we still have a
-  // usable prior seed, keep it and exit successfully so CI stays green.
+  // niftyindices.com is behind Akamai Bot Manager — automated clients often get homepage HTML.
+  // Fall back to NSE daily archives and extend TRI series with price returns.
   if (refreshed === 0) {
     console.warn(
-      `All ${failures.length} index fetches failed; keeping existing seed (${withData} indices). First error: ${failures[0]?.error}`,
+      `All TRI fetches failed (first: ${failures[0]?.error}). Trying NSE archive fallback…`,
     );
+    try {
+      const nse = await extendSeedFromNseArchives(existing.indices ?? {});
+      if (nse.extended > 0) {
+        const generatedAt = new Date().toISOString();
+        const payload = { version: 1, generatedAt, indices: nse.indices };
+        const json = JSON.stringify(payload);
+        mkdirSync(path.dirname(OUT_JSON), { recursive: true });
+        mkdirSync(path.dirname(PUBLIC_JSON), { recursive: true });
+        writeFileSync(OUT_JSON, json);
+        writeFileSync(PUBLIC_JSON, json);
+        const meta = {
+          generatedAt,
+          fetchedAt: generatedAt,
+          lastAttemptAt: generatedAt,
+          lastAttemptOk: true,
+          source: "nse-archives-price-return-extension",
+          note: "TRI API blocked; extended prior TRI levels using NSE price-index daily returns",
+          indexCount: BENCHMARK_INDEXES.length,
+          fetched: Object.values(nse.indices).filter((p) => Array.isArray(p) && p.length >= MIN_POINTS).length,
+          refreshed: nse.extended,
+          reused: withData - nse.extended,
+          nseArchiveDays: nse.days,
+          failed: failures.map((f) => f.id),
+        };
+        const metaJson = JSON.stringify(meta, null, 2);
+        writeFileSync(OUT_META, metaJson);
+        writeFileSync(PUBLIC_META, metaJson);
+        console.log(`Wrote ${OUT_JSON} via NSE fallback (${nse.extended} indices extended)`);
+        console.log(`Wrote ${OUT_META}`);
+        return;
+      }
+      console.warn("NSE fallback added no new days — keeping existing seed.");
+    } catch (e) {
+      console.warn("NSE fallback failed:", e instanceof Error ? e.message : e);
+    }
+
     const attemptMeta = {
       generatedAt: existing.generatedAt ?? new Date().toISOString(),
       fetchedAt: existing.generatedAt ?? new Date().toISOString(),
