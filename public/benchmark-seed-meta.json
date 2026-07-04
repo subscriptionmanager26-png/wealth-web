@@ -1,7 +1,7 @@
 {
   "generatedAt": "2026-07-02T15:58:52.934Z",
   "fetchedAt": "2026-07-02T15:58:52.934Z",
-  "lastAttemptAt": "2026-07-03T18:24:46.126Z",
+  "lastAttemptAt": "2026-07-04T06:54:29.745Z",
   "lastAttemptOk": false,
   "lastAttemptError": "Nifty TRI fetch failed for NIFTY 50: proxy: Unexpected token '<', \" <!DOCTYPE \"... is not valid JSON (status 200)",
   "source": "https://www.niftyindices.com/Backpage.aspx/getTotalReturnIndexString",
