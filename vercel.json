@@ -7,6 +7,9 @@
   "functions": {
     "api/**/*.js": {
       "maxDuration": 60
+    },
+    "api/broker/[...path].js": {
+      "maxDuration": 60
     }
   },
   "rewrites": [

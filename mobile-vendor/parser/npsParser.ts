@@ -24,12 +24,97 @@ import {
   parsePct,
 } from "./statementUtils";
 
+const SCHEME_ASSET_NAMES: Record<string, string> = {
+  E: "Equity",
+  C: "Corporate Bond",
+  G: "Government Securities",
+  A: "Alternative Investment",
+};
+
 const SCHEME_LABELS: Record<string, string> = {
   E: "Equity (Scheme E)",
   C: "Corporate Bond (Scheme C)",
   G: "Government Securities (Scheme G)",
   A: "Alternative Investment (Scheme A)",
 };
+
+/** Collapse repeated PFM tokens from columnar PDF merge: "HDFC ... HDFC ... HDFC ..." → one. */
+function normalizePensionFundLine(line: string): string {
+  let s = line.replace(/\s+/g, " ").trim();
+  s = s.replace(/\b(Limited)(\s+\1)+/gi, "$1");
+  const pfm = s.match(
+    /([A-Z][A-Za-z0-9&.]+(?:\s+[A-Za-z.&]+)*\s+Pension Fund(?:\s+Management)?)/i,
+  )?.[1]?.trim();
+  if (!pfm) return s;
+  const esc = pfm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const deduped = s.replace(new RegExp(`(?:${esc}\\s*)+`, "gi"), pfm).trim();
+  if (/Limited/i.test(s) && !/Limited$/i.test(deduped)) return `${pfm} Limited`;
+  return deduped;
+}
+
+/** Parse columnar PFM lines between SCHEME DETAILS and SCHEME_NAME (CRA layout). */
+function extractPensionFundManagers(block: string[]): string[] {
+  const schemeLines = block.filter((l) => /SCHEME_NAME\s+[ECGA]/i.test(l));
+  const schemeCount = schemeLines.reduce((n, line) => {
+    const matches = line.match(/SCHEME_NAME\s+[ECGA]/gi);
+    return n + (matches?.length ?? ( /SCHEME_NAME/i.test(line) ? 1 : 0));
+  }, 0);
+  if (!schemeCount) return [];
+
+  const schemeIdx = block.findIndex((l) => /SCHEME_NAME\s+[ECGA]/i.test(l));
+  const preLines: string[] = [];
+  for (let i = 0; i < schemeIdx; i += 1) {
+    const line = block[i]!.trim();
+    if (!line || /SCHEME DETAILS/i.test(line)) continue;
+    preLines.push(line);
+  }
+  if (!preLines.length) return [];
+
+  const managementLines = preLines
+    .filter((l) => /Pension Fund|Fund Management/i.test(l))
+    .map(normalizePensionFundLine);
+  const suffixLine = preLines.find((l) => /^Limited(?:\s+Limited)*$/i.test(l.trim()));
+
+  const managers: string[] = [];
+  if (managementLines.length >= schemeCount) {
+    for (let i = 0; i < schemeCount; i += 1) {
+      const base = managementLines[i]!.replace(/\s+Limited$/i, "").trim();
+      managers.push(suffixLine ? `${base} Limited` : managementLines[i]!.trim());
+    }
+  } else if (managementLines.length > 0) {
+    let full = managementLines[0]!;
+    if (suffixLine && !/Limited$/i.test(full)) full = `${full.replace(/\s+Limited$/i, "")} Limited`;
+    for (let i = 0; i < schemeCount; i += 1) managers.push(full);
+  } else {
+    const joined = normalizePensionFundLine(preLines.join(" "));
+    for (let i = 0; i < schemeCount; i += 1) managers.push(joined);
+  }
+  return managers.map((m) => m.replace(/\s+/g, " ").trim());
+}
+
+function tierRoman(tier: "T1" | "T2"): string {
+  return tier === "T1" ? "Tier I" : "Tier II";
+}
+
+function buildNpsSchemeName(amc: string | null, tier: "T1" | "T2", code: string | null): string | null {
+  if (!code) return null;
+  const asset = SCHEME_ASSET_NAMES[code] ?? `Scheme ${code}`;
+  const amcShort = amc
+    ? amc
+        .replace(/\s+Management\s+Limited$/i, "")
+        .replace(/\s+Limited$/i, "")
+        .trim()
+    : null;
+  const prefix = amcShort ?? "NPS";
+  return `${prefix} Scheme ${code} - ${tierRoman(tier)} (${asset})`;
+}
+
+function extractPensionFundFromText(text: string): string | null {
+  const m =
+    text.match(/(HDFC Pension Fund Management(?:\s+Limited)?)/i) ??
+    text.match(/([A-Z][A-Za-z]+(?:\s+[A-Za-z]+)* Pension Fund Management(?:\s+Limited)?)/);
+  return m?.[1]?.replace(/\s+/g, " ").trim() ?? null;
+}
 
 function isCraStatement(text: string): boolean {
   const t = text.toLowerCase();
@@ -71,12 +156,14 @@ function parseSchemeCodes(lines: string[], start: number, end: number): { code: 
   const schemes: { code: string; pct: string | null }[] = [];
   for (let i = start; i < end; i += 1) {
     const line = lines[i]!;
-    const m = line.match(/SCHEME_NAME\s+([ECGA])\s+(\d+(?:\.\d+)?)/i);
-    if (m) {
+    const re = /SCHEME_NAME\s+([ECGA])\s+(\d+(?:\.\d+)?)/gi;
+    let m: RegExpExecArray | null;
+    let found = false;
+    while ((m = re.exec(line)) !== null) {
       schemes.push({ code: m[1]!.toUpperCase(), pct: parsePct(m[2]!) });
-      continue;
+      found = true;
     }
-    // Sometimes "SCHEME_NAME E   75" with extra spaces
+    if (found) continue;
     const m2 = line.match(/SCHEME[_\s-]*NAME\s+([ECGA])\b/i);
     if (m2) {
       const pct = line.match(/\b(\d{1,3}(?:\.\d+)?)\s*$/)?.[1];
@@ -157,6 +244,7 @@ function parseTierBlock(
   }
 
   const schemes = parseSchemeCodes(block, 0, block.length);
+  const pfManagers = extractPensionFundManagers(block);
   const investments = findLabeledTriple(block, 0, block.length, /Current Investment/i);
   const units = findLabeledTriple(block, 0, block.length, /Total units/i);
   const navs = findLabeledTriple(block, 0, block.length, /Latest NAV/i);
@@ -164,16 +252,28 @@ function parseTierBlock(
   const gains = findGainTriple(block, 0, block.length);
 
   const holdings: NpsHoldingRow[] = [];
-  const n = Math.max(schemes.length, investments?.length ?? 0, values?.length ?? 0);
-  for (let i = 0; i < n; i += 1) {
+  const schemeCount = schemes.length;
+  const colCount = Math.max(
+    schemeCount,
+    investments?.length ?? 0,
+    units?.length ?? 0,
+    navs?.length ?? 0,
+    values?.length ?? 0,
+    gains?.length ?? 0,
+  );
+  for (let i = 0; i < colCount; i += 1) {
     const code = schemes[i]?.code ?? null;
+    const amc_name = pfManagers[i] ?? pfManagers[0] ?? pensionFund ?? null;
+    if (!code && !values?.[i] && !investments?.[i]) continue;
     holdings.push({
       pran,
       tier,
       scheme_code: code,
-      scheme_name: code ? SCHEME_LABELS[code] ?? `Scheme ${code}` : null,
+      scheme_name:
+        buildNpsSchemeName(amc_name, tier, code) ?? (code ? SCHEME_LABELS[code] ?? `Scheme ${code}` : null),
+      amc_name,
       allocation_pct: schemes[i]?.pct ?? null,
-      pension_fund: pensionFund,
+      pension_fund: amc_name,
       invested_amount_inr: investments ? parseMoney(investments[i]!) : null,
       units: units ? parseMoney(units[i]!) : null,
       nav_inr: navs ? parseMoney(navs[i]!) : null,
@@ -245,11 +345,8 @@ function parseCraStatement(lines: string[], fileName: string): ParsedNpsStatemen
   const tier1Xirr = parsePct(text.match(/Tier 1 XIRR since inception\s+([\d.]+)%/i)?.[1] ?? null);
   const tier2Xirr = parsePct(text.match(/Tier 2 XIRR since inception\s+([\d.]+)%/i)?.[1] ?? null);
 
-  // Pension fund manager (repeated 3x in columns)
-  const pf =
-    text.match(/(HDFC Pension Fund Management(?:\s+Limited)?)/i)?.[1]?.replace(/\s+/g, " ").trim() ??
-    text.match(/([A-Z][A-Za-z]+ Pension Fund Management(?:\s+Limited)?)/)?.[1] ??
-    null;
+  // Pension fund manager fallback from full statement text
+  const pf = extractPensionFundFromText(text);
 
   // Nominees: "Sangeeta Agarwal   Dependent Mother   50   50"
   const nominees: NpsNominee[] = [];
@@ -361,6 +458,7 @@ export function parseNpsHoldingsFromLines(linesIn: string[]): NpsHoldingRow[] {
       pran,
       tier,
       scheme_name,
+      amc_name: null,
       scheme_code: line.match(ISIN_RE)?.[1]?.toUpperCase() ?? null,
       allocation_pct: null,
       pension_fund: null,

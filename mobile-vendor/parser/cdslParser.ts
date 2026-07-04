@@ -16,9 +16,12 @@ import {
   DATE_RE,
   ISIN_RE,
   cleanLines,
+  englishOnlyText,
+  extractCdslInvestorName,
   extractPan,
   extractPeriod,
   isBoilerLine,
+  isEnglishSecurityLine,
   moneyTokens,
   normalizeDate,
   parseMoney,
@@ -139,24 +142,120 @@ function parseHoldingNumbers(line: string): {
   return { current, free, price, value };
 }
 
-function parseDematHoldings(lines: string[], accounts: DematAccount[]): DematHoldingRow[] {
-  const holdings: DematHoldingRow[] = [];
-  const holdStart = lines.findIndex((l) => /HOLDING STATEMENT AS ON/i.test(l));
-  if (holdStart < 0) return holdings;
+function isDematSectionBoiler(line: string): boolean {
+  if (isBoilerLine(line)) return true;
+  if (!line.trim()) return true;
+  if (
+    /^(Page|Central Depository|CONSOLIDATED ACCOUNT|FORM AND|Investments Account|Account Details|Market|Current|Frozen|Pledge|Free Bal|Pending|Demat\s+Remat|Setup|Value)$/i.test(
+      line.trim(),
+    )
+  ) {
+    return true;
+  }
+  if (/HOLDING STATEMENT|MUTUAL FUND UNITS|Portfolio Value|ISIN ISIN/i.test(line)) return true;
+  if (/^Bal\s|^Bal$|Face Value|शेष|मूल्य|लॉक|तारीख/i.test(line)) return true;
+  if (/^\d{2}\.\d{2}\.\d{4}$/.test(line.trim())) return true;
+  return false;
+}
 
-  // Prefer demat account that actually has holdings value
-  const active =
+function stripInlineMetricsFromIsinTail(text: string): string {
+  return text.replace(/\s+[\d,]+\.\d+(\s+(?:--\s+)?[\d,]+\.\d+)*.*$/, "").trim();
+}
+
+function dedupeNameParts(parts: string[]): string {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of parts) {
+    const cleaned = part.replace(/\s+/g, " ").trim();
+    if (!cleaned) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+  }
+  return out
+    .join(" ")
+    .replace(/\s+[\d,]+\.\d+(\s+--\s*)+/g, " ")
+    .replace(/\s+--\s+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function collectDematSecurityName(slice: string[], isinIdx: number, isinLine: string): string {
+  const parts: string[] = [];
+  for (let k = isinIdx - 1; k >= Math.max(0, isinIdx - 6); k -= 1) {
+    const prev = slice[k]!;
+    if (ISIN_RE.test(prev)) break;
+    if (parseHoldingNumbers(prev)) break;
+    if (isDematSectionBoiler(prev)) continue;
+    if (isEnglishSecurityLine(prev)) {
+      parts.unshift(englishOnlyText(prev.replace(/^@\s*/, "")));
+    }
+  }
+
+  const afterIsin = stripInlineMetricsFromIsinTail(isinLine.replace(ISIN_RE, " ").trim());
+  if (afterIsin && isEnglishSecurityLine(afterIsin)) {
+    parts.push(englishOnlyText(afterIsin));
+  }
+
+  const isinHasInlineMetrics = parseHoldingNumbers(isinLine) != null;
+  const skipForward = isinHasInlineMetrics && afterIsin.length > 0;
+  const forwardLimit = isinHasInlineMetrics ? 2 : 5;
+  let j = isinIdx + 1;
+  let forwardNameLines = 0;
+  if (!skipForward) {
+    while (j < slice.length && j < isinIdx + forwardLimit) {
+      const nxt = slice[j]!;
+      if (ISIN_RE.test(nxt)) break;
+      if (parseHoldingNumbers(nxt)) break;
+      if (moneyTokens(nxt).length >= 2) break;
+      if (isDematSectionBoiler(nxt)) {
+        j += 1;
+        continue;
+      }
+      if (isEnglishSecurityLine(nxt)) {
+        parts.push(englishOnlyText(nxt));
+        forwardNameLines += 1;
+        j += 1;
+        if (isinHasInlineMetrics && forwardNameLines >= 1) break;
+        continue;
+      }
+      break;
+    }
+  }
+
+  return dedupeNameParts(parts);
+}
+
+function findMainDematHoldingsEnd(lines: string[], holdStart: number): number {
+  for (let idx = holdStart + 1; idx < lines.length; idx += 1) {
+    if (/HOLDING STATEMENT AS ON.*Other Details/i.test(lines[idx]!)) return idx;
+  }
+  const pv = lines.findIndex((l, idx) => idx > holdStart && /Portfolio Value\s*`?\s*[\d,]/i.test(l));
+  return pv > holdStart ? pv : lines.length;
+}
+
+function activeDematAccount(accounts: DematAccount[]): DematAccount | undefined {
+  return (
     [...accounts].find((a) => a.value_inr && Number(a.value_inr) > 0) ??
     [...accounts].reverse().find((a) => a.dp_name && /SBICAP|ZERODHA|GROWW|ANGEL/i.test(a.dp_name)) ??
-    accounts[accounts.length - 1];
+    accounts[accounts.length - 1]
+  );
+}
 
-  const end = lines.findIndex((l, idx) => idx > holdStart && /Portfolio Value\s*`?\s*[\d,]/i.test(l));
-  const slice = lines.slice(holdStart, end > holdStart ? end + 1 : undefined);
+function parseDematHoldings(lines: string[], accounts: DematAccount[]): DematHoldingRow[] {
+  const holdings: DematHoldingRow[] = [];
+  const holdStart = lines.findIndex((l) => /HOLDING STATEMENT AS ON/i.test(l) && !/Other Details/i.test(l));
+  if (holdStart < 0) return holdings;
+
+  const active = activeDematAccount(accounts);
+  const end = findMainDematHoldingsEnd(lines, holdStart);
+  const slice = lines.slice(holdStart, end);
 
   let i = 0;
   while (i < slice.length) {
     const line = slice[i]!;
-    if (isBoilerLine(line) || /HOLDING STATEMENT|^\s*Pledge|^\s*Market|^\s*Current|Free Bal|Face Value/i.test(line)) {
+    if (isDematSectionBoiler(line)) {
       i += 1;
       continue;
     }
@@ -167,63 +266,142 @@ function parseDematHoldings(lines: string[], accounts: DematAccount[]): DematHol
       continue;
     }
     const isin = isinM[1]!.toUpperCase();
-    const nameParts: string[] = [];
-    for (let k = Math.max(0, i - 3); k < i; k += 1) {
-      const prev = slice[k]!;
-      if (ISIN_RE.test(prev) || moneyTokens(prev).length >= 3) continue;
-      if (isBoilerLine(prev) || /HOLDING STATEMENT|Pledge|Market|Current|Free Bal/i.test(prev)) continue;
-      nameParts.push(prev.replace(/^@\s*/, "").replace(/#/g, " ").trim());
-    }
-    const inlineName = line
-      .replace(ISIN_RE, " ")
-      .replace(/([\d,]+\.\d+|\s--\s)/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (inlineName.length > 2) nameParts.push(inlineName);
+    const security_name = collectDematSecurityName(slice, i, line);
 
-    let numsLine = line;
     let parsed = parseHoldingNumbers(line);
     let j = i + 1;
     while (j < slice.length && j < i + 6) {
       const nxt = slice[j]!;
       if (ISIN_RE.test(nxt)) break;
-      if (/Portfolio Value/i.test(nxt)) break;
-      if (/^(Note:|\*|\$|@|~|!!|##)/.test(nxt)) break;
       const nxtParsed = parseHoldingNumbers(nxt);
       if (nxtParsed) {
         parsed = nxtParsed;
-        numsLine = nxt;
         j += 1;
         break;
       }
-      if (moneyTokens(nxt).length < 2 && !isBoilerLine(nxt)) {
-        nameParts.push(nxt.replace(/^@\s*/, "").trim());
+      if (isDematSectionBoiler(nxt)) {
+        j += 1;
+        continue;
+      }
+      if (!isEnglishSecurityLine(nxt) && moneyTokens(nxt).length < 2) {
         j += 1;
         continue;
       }
       break;
     }
-    void numsLine;
 
-    if (parsed) {
-      const security_name = nameParts
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .replace(/#/g, " ")
-        .trim();
+    if (parsed && security_name) {
+      const priceNum = Number(parsed.price ?? 0);
+      const valueNum = Number(parsed.value ?? 0);
+      if (priceNum > 0 || valueNum > 0) {
+        holdings.push({
+          isin,
+          security_name,
+          current_balance: parsed.current ?? "0",
+          free_balance: parsed.free,
+          pledge_balance: null,
+          frozen_balance: null,
+          market_price_inr: parsed.price,
+          market_value_inr: parsed.value,
+          dp_id: active?.dp_id ?? null,
+          client_id: active?.client_id ?? null,
+          bo_id: active?.bo_id ?? null,
+          dp_name: active?.dp_name ?? null,
+          is_locked: false,
+        });
+      }
+    }
+    i = Math.max(j, i + 1);
+  }
+
+  return holdings;
+}
+
+const LOCK_ROW_RE =
+  /^(IN[A-Z0-9]{10})\s+(?:(\d{2}-\d{2}-\d{4})\s+\S+\s+)?([\d,]+\.\d+)\s+0\.?0*0\s+0\.?0*0/i;
+const LOCK_DATE_ROW_RE = /^(\d{2}-\d{2}-\d{4})\s+\S+\s+([\d,]+\.\d+)\s+0\.?0*0\s+0\.?0*0/i;
+
+function parseLockedDematHoldings(lines: string[], accounts: DematAccount[]): DematHoldingRow[] {
+  const holdings: DematHoldingRow[] = [];
+  const lockStart = lines.findIndex((l) => /HOLDING STATEMENT AS ON.*Other Details/i.test(l));
+  if (lockStart < 0) return holdings;
+
+  const active = activeDematAccount(accounts);
+  const end = lines.findIndex((l, idx) => idx > lockStart && /Portfolio Value\s*`?\s*[\d,]/i.test(l));
+  const slice = lines.slice(lockStart, end > lockStart ? end : undefined);
+
+  let i = 0;
+  while (i < slice.length) {
+    const line = slice[i]!;
+    if (isDematSectionBoiler(line) && !ISIN_RE.test(line)) {
+      i += 1;
+      continue;
+    }
+
+    const isinM = line.match(ISIN_RE);
+    if (!isinM) {
+      i += 1;
+      continue;
+    }
+
+    const isin = isinM[1]!.toUpperCase();
+    const nameParts: string[] = [];
+    for (let k = i - 1; k >= Math.max(0, i - 4); k -= 1) {
+      const prev = slice[k]!;
+      if (ISIN_RE.test(prev)) break;
+      if (LOCK_DATE_ROW_RE.test(prev)) break;
+      if (isDematSectionBoiler(prev)) continue;
+      if (isEnglishSecurityLine(prev)) nameParts.unshift(englishOnlyText(prev));
+    }
+
+    let releaseDate: string | null = null;
+    let qty: string | null = null;
+    let j = i + 1;
+
+    const inline = line.match(LOCK_ROW_RE);
+    if (inline) {
+      releaseDate = inline[2] ? normalizeDate(inline[2]) : null;
+      qty = parseMoney(inline[3]!);
+    } else {
+      const afterIsin = stripInlineMetricsFromIsinTail(line.replace(ISIN_RE, " ").trim());
+      if (afterIsin && isEnglishSecurityLine(afterIsin)) nameParts.push(englishOnlyText(afterIsin));
+
+      while (j < slice.length && j < i + 5) {
+        const nxt = slice[j]!;
+        if (ISIN_RE.test(nxt)) break;
+        if (LOCK_DATE_ROW_RE.test(nxt)) {
+          releaseDate = normalizeDate(nxt.match(LOCK_DATE_ROW_RE)![1]!);
+          qty = parseMoney(nxt.match(LOCK_DATE_ROW_RE)![2]!);
+          j += 1;
+          break;
+        }
+        if (isEnglishSecurityLine(nxt)) {
+          nameParts.push(englishOnlyText(nxt));
+          j += 1;
+          continue;
+        }
+        if (!isDematSectionBoiler(nxt)) break;
+        j += 1;
+      }
+    }
+
+    if (qty) {
+      const security_name = dedupeNameParts(nameParts) || isin;
       holdings.push({
         isin,
         security_name,
-        current_balance: parsed.current ?? "0",
-        free_balance: parsed.free,
+        current_balance: qty,
+        free_balance: null,
         pledge_balance: null,
         frozen_balance: null,
-        market_price_inr: parsed.price,
-        market_value_inr: parsed.value,
+        market_price_inr: null,
+        market_value_inr: null,
         dp_id: active?.dp_id ?? null,
         client_id: active?.client_id ?? null,
         bo_id: active?.bo_id ?? null,
         dp_name: active?.dp_name ?? null,
+        is_locked: true,
+        lockin_release_date: releaseDate,
       });
     }
     i = Math.max(j, i + 1);
@@ -325,22 +503,181 @@ function parseDematTransactions(lines: string[], accounts: DematAccount[]): Dema
   return txns;
 }
 
+const PARTIAL_ISIN_ONLY_RE = /^\s*(IN[A-Z0-9]{8,11})\s*$/i;
+const MF_SCHEME_CODE_RE = /^[A-Z0-9]{2,6}\s*-\s*/;
+const MF_FOLIO_RE = /\b(\d{5,}(?:\/\d+)?)\b/;
+
+function isMfSectionBoiler(line: string): boolean {
+  if (isBoilerLine(line)) return true;
+  if (!line.trim()) return true;
+  if (
+    /MUTUAL FUND UNITS HELD|Scheme Name|Folio No|Grand Total|Load Structures|Unrealised|Profit\/Loss|Cumulative|Annuali|Closing|INR\)|Valuation|Central Depository|CONSOLIDATED ACCOUNT|FORM AND|Page \d+|A Wing|Lower Parel|Mafatlal|Joshi Marg|sebi has mandated/i.test(
+      line,
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isMfMetricsDataLine(line: string): boolean {
+  if (ISIN_RE.test(line) && moneyTokens(line.replace(ISIN_RE, " ")).length >= 4) return true;
+  if (!ISIN_RE.test(line) && moneyTokens(line).length >= 6) return true;
+  if (/\d{5,}(?:\/\d+)?/.test(line) && moneyTokens(line).length >= 4) return true;
+  return false;
+}
+
+function isMfSchemeLine(line: string): boolean {
+  if (isMfSectionBoiler(line)) return false;
+  if (/\uFFFD/.test(line)) return false;
+  const t = englishOnlyText(line);
+  if (t.length < 2) return false;
+  if (/^(sed |Unrealised|Scheme Name|Invested|Return|Valuation|Closing|Cumulative|Bal\s*\()/i.test(t)) return false;
+  if (/\( NAV \)|INR\)/i.test(line)) return false;
+  if (MF_SCHEME_CODE_RE.test(t)) return true;
+  if (isEnglishSecurityLine(line)) return true;
+  if (/fund|plan|growth|elss|cap|etf|liquid|equity|tax|saver|direct|regular|option|birla|axis|icici|kotak|nippon|sbi|tata|mirae|motilal|bandhan|invesco|ppfas/i.test(t)) {
+    return true;
+  }
+  return /^[A-Za-z]/.test(t) && t.length >= 3;
+}
+
+function findPrevIsinIndex(slice: string[], fromIdx: number): number {
+  for (let k = fromIdx - 1; k >= 0; k -= 1) {
+    if (ISIN_RE.test(slice[k]!)) return k;
+  }
+  return -1;
+}
+
+function mfSchemeBlockStart(slice: string[], prevIsinIdx: number, beforeIdx: number): number {
+  if (prevIsinIdx < 0) {
+    for (let k = beforeIdx - 1; k >= Math.max(0, beforeIdx - 15); k -= 1) {
+      const clean = englishOnlyText(slice[k]!);
+      if (MF_SCHEME_CODE_RE.test(clean)) return k;
+    }
+    return Math.max(0, beforeIdx - 6);
+  }
+  for (let k = prevIsinIdx + 1; k < beforeIdx; k += 1) {
+    const clean = englishOnlyText(slice[k]!);
+    if (MF_SCHEME_CODE_RE.test(clean)) return k;
+  }
+  return prevIsinIdx + 1;
+}
+
+function collectMfSchemeName(slice: string[], isinIdx: number): string {
+  const parts: string[] = [];
+  const prevIsinIdx = findPrevIsinIndex(slice, isinIdx);
+  const start = mfSchemeBlockStart(slice, prevIsinIdx, isinIdx);
+
+  for (let k = isinIdx - 1; k >= start; k -= 1) {
+    const prev = slice[k]!;
+    if (ISIN_RE.test(prev)) break;
+    if (isMfMetricsDataLine(prev)) break;
+    if (isMfSectionBoiler(prev)) continue;
+    if (isMfSchemeLine(prev)) parts.unshift(englishOnlyText(prev));
+  }
+
+  for (let j = isinIdx + 1; j < Math.min(slice.length, isinIdx + 8); j += 1) {
+    const nxt = slice[j]!;
+    if (ISIN_RE.test(nxt)) break;
+    if (isMfMetricsDataLine(nxt)) break;
+    if (isMfSectionBoiler(nxt)) break;
+    const clean = englishOnlyText(nxt);
+    if (MF_SCHEME_CODE_RE.test(clean)) break;
+    if (isMfSchemeLine(nxt)) parts.push(clean);
+    else break;
+  }
+  return dedupeNameParts(parts);
+}
+
+/** CDSL sometimes splits ISIN across lines: INF769K01D / metrics / M9 */
+function repairSplitIsinMfLines(lines: string[]): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i]!;
+    const partial = line.match(PARTIAL_ISIN_ONLY_RE)?.[1];
+    if (partial && partial.length < 12) {
+      const prefix = partial.toUpperCase();
+      const need = 12 - prefix.length;
+      const metricsLine = lines[i + 1]?.trim() ?? "";
+      const suffixLine = lines[i + 2]?.trim() ?? "";
+      const sfxM = suffixLine.match(new RegExp(`^([A-Z0-9]{${need}})\\b`, "i"));
+      if (sfxM && /[\d,]+\.\d+/.test(metricsLine)) {
+        const fullIsin = prefix + sfxM[1]!.toUpperCase();
+        if (/^IN[A-Z0-9]{10}$/.test(fullIsin)) {
+          out.push(`${fullIsin}   ${metricsLine}`);
+          i += 3;
+          continue;
+        }
+      }
+    }
+    out.push(line);
+    i += 1;
+  }
+  return out;
+}
+
+function parseMfMetricsFromIsinLine(line: string, isin: string): {
+  folio: string | null;
+  units: string | null;
+  nav: string | null;
+  cost: string | null;
+  market: string | null;
+  gainPct: string | null;
+} {
+  let rest = line.replace(new RegExp(`\\b${isin}\\b`, "i"), " ");
+  let folio: string | null = null;
+  const folioM = rest.match(MF_FOLIO_RE);
+  if (folioM) {
+    folio = folioM[1]!;
+    rest = rest.replace(folioM[0], " ");
+  }
+  const numMatch = rest.match(
+    /([\d,]+\.\d+)\s+([\d,]+\.\d+)\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d+)/,
+  );
+  if (numMatch) {
+    return {
+      folio,
+      units: parseMoney(numMatch[1]!),
+      nav: parseMoney(numMatch[2]!),
+      cost: parseMoney(numMatch[3]!),
+      market: parseMoney(numMatch[4]!),
+      gainPct: parsePct(numMatch[6]!),
+    };
+  }
+  const toks = moneyTokens(rest);
+  if (toks.length >= 6) {
+    return {
+      folio,
+      units: parseMoney(toks[0]!),
+      nav: parseMoney(toks[1]!),
+      cost: parseMoney(toks[2]!),
+      market: parseMoney(toks[3]!),
+      gainPct: parsePct(toks[5]!),
+    };
+  }
+  return { folio, units: null, nav: null, cost: null, market: null, gainPct: null };
+}
+
+function splitMfSchemeCode(scheme_name: string): { scheme_code: string | null; scheme_name: string } {
+  const m = scheme_name.match(/^([A-Z0-9]{2,6})\s*-\s*(.+)$/);
+  if (m) return { scheme_code: m[1]!, scheme_name: m[2]!.trim() };
+  return { scheme_code: null, scheme_name };
+}
+
 function parseCdslMfHoldings(lines: string[]): MfHoldingRow[] {
   const holdings: MfHoldingRow[] = [];
   const start = lines.findIndex((l) => /MUTUAL FUND UNITS HELD AS ON/i.test(l));
   if (start < 0) return holdings;
 
   const end = lines.findIndex((l, idx) => idx > start && (/Grand Total/i.test(l) || /Load Structures/i.test(l)));
-  const slice = lines.slice(start, end > start ? end + 1 : undefined);
+  const slice = repairSplitIsinMfLines(lines.slice(start, end > start ? end + 1 : undefined));
 
   let i = 0;
   while (i < slice.length) {
     const line = slice[i]!;
-    if (/MUTUAL FUND UNITS HELD|Scheme Name|Folio No|Grand Total|Load Structures|Unrealised|Profit\/Loss/i.test(line)) {
-      i += 1;
-      continue;
-    }
-    if (isBoilerLine(line)) {
+    if (isMfSectionBoiler(line)) {
       i += 1;
       continue;
     }
@@ -348,86 +685,26 @@ function parseCdslMfHoldings(lines: string[]): MfHoldingRow[] {
     const isinM = line.match(ISIN_RE);
     if (isinM) {
       const isin = isinM[1]!.toUpperCase();
-      const nameParts: string[] = [];
-      for (let k = Math.max(0, i - 3); k < i; k += 1) {
-        const prev = slice[k]!;
-        if (ISIN_RE.test(prev) || moneyTokens(prev).length >= 4) continue;
-        if (/Scheme Name|Folio|Unrealised|Closing|Invested|Loss\(%\)|NAV/i.test(prev)) continue;
-        // Skip lone plan suffix left over from previous row
-        if (/^(Growth|IDCW|Dividend|Direct|Regular)$/i.test(prev.trim())) continue;
-        nameParts.push(prev);
-      }
+      const scheme_name_raw = collectMfSchemeName(slice, i);
+      const metrics = parseMfMetricsFromIsinLine(line, isin);
 
-      let rest = line.replace(ISIN_RE, " ");
-      let folio: string | null = null;
-      const folioM = rest.match(/(\d{5,}\/\d+)/);
-      if (folioM) {
-        folio = folioM[1]!;
-        rest = rest.replace(folioM[0], " ");
-      }
-
-      // units nav invested valuation profit pct — all on this line after folio
-      const numMatch = rest.match(
-        /([\d,]+\.\d+)\s+([\d,]+\.\d+)\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d+)/,
-      );
-      let units: string | null = null;
-      let nav: string | null = null;
-      let cost: string | null = null;
-      let market: string | null = null;
-      let gainPct: string | null = null;
-      let j = i + 1;
-      if (numMatch) {
-        units = parseMoney(numMatch[1]!);
-        nav = parseMoney(numMatch[2]!);
-        cost = parseMoney(numMatch[3]!);
-        market = parseMoney(numMatch[4]!);
-        gainPct = parsePct(numMatch[6]!);
-      } else {
-        const toks = moneyTokens(rest);
-        if (toks.length >= 6) {
-          units = parseMoney(toks[0]!);
-          nav = parseMoney(toks[1]!);
-          cost = parseMoney(toks[2]!);
-          market = parseMoney(toks[3]!);
-          gainPct = parsePct(toks[5]!);
-        }
-      }
-
-      while (j < slice.length && j < i + 3) {
-        const nxt = slice[j]!;
-        if (ISIN_RE.test(nxt) || /Grand Total/i.test(nxt)) break;
-        if (moneyTokens(nxt).length < 2 && /growth|plan|fund/i.test(nxt)) {
-          nameParts.push(nxt);
-          j += 1;
-          continue;
-        }
-        break;
-      }
-
-      if (units && market) {
-        let scheme_code: string | null = null;
-        let scheme_name = nameParts.join(" ").replace(/\s+/g, " ").trim();
-        const codeM = scheme_name.match(/^(\d+|[A-Z]{2,5})\s*-\s*(.+)$/);
-        if (codeM) {
-          scheme_code = codeM[1]!;
-          scheme_name = codeM[2]!.trim();
-        }
+      if (metrics.units && metrics.market) {
         holdings.push({
           amc: null,
-          folio_no: folio,
+          folio_no: metrics.folio,
           isin,
-          scheme_code,
-          scheme_name: scheme_name || null,
-          closing_units: units,
-          nav_inr: nav,
-          cost_value_inr: cost,
-          market_value_inr: market,
-          gain_pct: gainPct,
+          scheme_code: splitMfSchemeCode(scheme_name_raw).scheme_code,
+          scheme_name: scheme_name_raw || null,
+          closing_units: metrics.units,
+          nav_inr: metrics.nav,
+          cost_value_inr: metrics.cost,
+          market_value_inr: metrics.market,
+          gain_pct: metrics.gainPct,
           plan_tag: null,
           transactions: [],
         });
       }
-      i = Math.max(j, i + 1);
+      i += 1;
       continue;
     }
 
@@ -556,6 +833,93 @@ function parseCdslMfTransactions(lines: string[], holdings: MfHoldingRow[]): voi
   void folio;
 }
 
+const CDSL_AMC_LINE_RE = /AMC Name\s*:\s*(.+)/i;
+const CDSL_ISIN_LABEL_RE = /ISIN\s*:\s*(IN[A-Z0-9]{10})/i;
+const CDSL_FOLIO_LABEL_RE = /Folio No\s*:\s*([\d/]+)/i;
+const CDSL_SCHEME_NAME_RE = /Scheme Name\s*:\s*(.+)/i;
+
+function parseCdslMfAmcByIsin(lines: string[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (let i = 0; i < lines.length; i += 1) {
+    const amcM = lines[i]!.match(CDSL_AMC_LINE_RE);
+    if (!amcM) continue;
+    const amc = englishOnlyText(amcM[1]!.trim());
+    if (!amc) continue;
+
+    let isin: string | null = null;
+    for (let j = i + 1; j < Math.min(lines.length, i + 16); j += 1) {
+      const blockLine = lines[j]!;
+      if (j > i + 1 && CDSL_AMC_LINE_RE.test(blockLine)) break;
+      const isinM = blockLine.match(CDSL_ISIN_LABEL_RE);
+      if (isinM) {
+        isin = isinM[1]!.toUpperCase();
+        break;
+      }
+    }
+    if (isin) map.set(isin, amc);
+  }
+  return map;
+}
+
+function applyCdslMfAmcFromAccountDetails(lines: string[], holdings: MfHoldingRow[]): void {
+  const amcByIsin = parseCdslMfAmcByIsin(lines);
+  for (const h of holdings) {
+    if (!h.isin) continue;
+    const amc = amcByIsin.get(h.isin);
+    if (amc) h.amc = amc;
+  }
+
+  // Enrich scheme / folio from labelled account-detail blocks when helpful
+  for (let i = 0; i < lines.length; i += 1) {
+    const amcM = lines[i]!.match(CDSL_AMC_LINE_RE);
+    if (!amcM) continue;
+    const amc = englishOnlyText(amcM[1]!.trim());
+
+    let isin: string | null = null;
+    let folio: string | null = null;
+    const schemeParts: string[] = [];
+    let inScheme = false;
+
+    for (let j = i + 1; j < Math.min(lines.length, i + 16); j += 1) {
+      const blockLine = lines[j]!;
+      if (j > i + 1 && CDSL_AMC_LINE_RE.test(blockLine)) break;
+
+      const isinM = blockLine.match(CDSL_ISIN_LABEL_RE);
+      if (isinM) isin = isinM[1]!.toUpperCase();
+
+      const folioM = blockLine.match(CDSL_FOLIO_LABEL_RE);
+      if (folioM) folio = folioM[1]!;
+
+      const schemeM = blockLine.match(CDSL_SCHEME_NAME_RE);
+      if (schemeM) {
+        schemeParts.length = 0;
+        schemeParts.push(englishOnlyText(schemeM[1]!.trim()));
+        inScheme = true;
+        continue;
+      }
+
+      if (inScheme) {
+        if (/Scheme Code|Folio No|KYC|ISIN|Mode of Holding|Nominee|Email id/i.test(blockLine)) {
+          inScheme = false;
+        } else if (blockLine.length < 100 && !isBoilerLine(blockLine)) {
+          schemeParts.push(englishOnlyText(blockLine));
+        }
+      }
+    }
+
+    if (!isin) continue;
+    const targets = holdings.filter((h) => h.isin === isin && (!folio || h.folio_no === folio));
+    const scheme_name = dedupeNameParts(schemeParts);
+    for (const h of targets.length ? targets : holdings.filter((x) => x.isin === isin)) {
+      if (amc) h.amc = amc;
+      if (scheme_name && (!h.scheme_name || h.scheme_name.length < scheme_name.length * 0.6)) {
+        h.scheme_name = scheme_name;
+      }
+      if (folio && !h.folio_no) h.folio_no = folio;
+    }
+  }
+}
+
 export function parseCdslFromLines(linesIn: string[], fileName = "cdsl-cas.pdf"): ParsedCdslStatement {
   const lines = cleanLines(linesIn);
   const text = lines.join("\n");
@@ -563,15 +927,7 @@ export function parseCdslFromLines(linesIn: string[], fileName = "cdsl-cas.pdf")
 
   const casId = text.match(/CAS ID:\s*([A-Z0-9]+)/i)?.[1] ?? null;
   const pan = extractPan(text);
-  const nameM =
-    text.match(/In the single name of\s*\n?\s*([A-Z][A-Za-z .]+)\s*\(\s*PAN/i) ??
-    text.match(/SATISH KUMAR|Name\/Joint Name[^\n]*\n([A-Z][A-Za-z .]+)/);
-  let investor_name: string | null = null;
-  const nameLine = lines.find((l) => /^[A-Z][A-Z\s]{2,}$/.test(l) && l.length < 40 && !/CDSL|DEMAT|TOTAL|PAGE/i.test(l));
-  if (nameLine) investor_name = nameLine.trim();
-  const single = text.match(/In the single name of\s+([A-Za-z .]+)\s*\(\s*PAN/i);
-  if (single) investor_name = single[1]!.trim();
-  void nameM;
+  const investor_name = extractCdslInvestorName(lines);
 
   const addrParts: string[] = [];
   for (const l of lines.slice(0, 50)) {
@@ -601,34 +957,11 @@ export function parseCdslFromLines(linesIn: string[], fileName = "cdsl-cas.pdf")
 
   const accounts = parseDematAccounts(lines);
   const demat_holdings = parseDematHoldings(lines, accounts);
+  const locked_demat_holdings = parseLockedDematHoldings(lines, accounts);
   const demat_transactions = parseDematTransactions(lines, accounts);
   const mf_holdings = parseCdslMfHoldings(lines);
   parseCdslMfTransactions(lines, mf_holdings);
-
-  // Fill AMC from account details section
-  for (const h of mf_holdings) {
-    if (h.amc) continue;
-    const block = lines.find((l) => h.isin && l.includes(h.isin));
-    void block;
-  }
-  for (let i = 0; i < lines.length; i += 1) {
-    const amcLine = lines[i]!.match(/^AMC Name\s*:\s*(.+)$/i);
-    if (!amcLine) continue;
-    const schemeLine = lines[i + 1] ?? "";
-    const isinLine = lines.slice(i, i + 5).find((l) => ISIN_RE.test(l));
-    const isin = isinLine?.match(ISIN_RE)?.[1]?.toUpperCase();
-    if (!isin) continue;
-    const h = mf_holdings.find((x) => x.isin === isin);
-    if (h) {
-      h.amc = amcLine[1]!.trim();
-      if (!h.scheme_name && /Scheme Name\s*:\s*(.+?)(?:\s+Scheme Code|$)/i.test(schemeLine)) {
-        h.scheme_name = schemeLine.match(/Scheme Name\s*:\s*(.+?)(?:\s+Scheme Code|$)/i)?.[1]?.trim() ?? h.scheme_name;
-      }
-      const folioLine = lines.slice(i, i + 5).find((l) => /Folio No\s*:/i.test(l));
-      const folio = folioLine?.match(/Folio No\s*:\s*([\d/]+)/i)?.[1];
-      if (folio && !h.folio_no) h.folio_no = folio;
-    }
-  }
+  applyCdslMfAmcFromAccountDetails(lines, mf_holdings);
 
   const nps_holdings = parseNpsHoldingsFromLines(lines);
   const nps_value_inr = nps_holdings.length
@@ -652,6 +985,7 @@ export function parseCdslFromLines(linesIn: string[], fileName = "cdsl-cas.pdf")
     nps_value_inr,
     demat_accounts: accounts,
     demat_holdings,
+    locked_demat_holdings,
     demat_transactions,
     mf_holdings,
     nps_holdings,

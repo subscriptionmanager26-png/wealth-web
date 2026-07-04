@@ -20,6 +20,7 @@
     "statement-demo": "npx tsx scripts/statement-demo-server.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "decimal.js": "^10.6.0",
     "katex": "^0.17.0",
     "pdfjs-dist": "^4.10.38",

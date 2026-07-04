@@ -26,6 +26,20 @@ import {
 import type { BenchmarkId, BenchmarkMonthEndPoint } from "@mobile/utils/benchmarkTypes";
 import type { UpvalySchemeDetail } from "@mobile/utils/upvalyMfApi";
 import { parseCasFromPdfText } from "@mobile/utils/casParser";
+import { parseAnyStatementFromLines } from "@mobile/utils/statementParser";
+import {
+  aggregateTrackerStatements,
+  buildTrackerStatementViews,
+  type TrackerCombinedView,
+  type TrackerStatementView,
+} from "../lib/trackerAggregation";
+import {
+  loadAllTrackerEntries,
+  removeTrackerDoc,
+  saveTrackerStatement,
+  type SavedTrackerFile,
+  type StoredTrackerPayload,
+} from "../lib/trackerLibrary";
 
 import { buildHoldingsFromParsedFiles, type FundHolding, type Profile } from "../lib/buildHoldings";
 import {
@@ -37,7 +51,12 @@ import {
   type SavedParsedCasFile,
   updateParsedCas,
 } from "../lib/casLibrary";
-import { extractPdfTextFromFile } from "../lib/pdfExtract";
+import {
+  extractPdfLinesFromFile,
+  extractPdfTextFromFile,
+  PdfIncorrectPasswordError,
+  PdfPasswordRequiredError,
+} from "../lib/pdfExtract";
 import { formatPct } from "../lib/format";
 import { Wealth } from "../theme/wealthTheme";
 import { loadPipelineMilestones, savePipelineMilestones, type CasPipelineMilestones } from "../lib/casPipeline";
@@ -75,7 +94,7 @@ import {
 } from "../lib/diagnosticsLog";
 
 export type HomeTabId = "overview" | "analysis" | "insights" | "funds";
-export type BottomTabId = "home" | "screener" | "ai" | "account";
+export type BottomTabId = "home" | "tracker" | "screener" | "ai" | "account";
 
 export type Toast = { kind: "success" | "error"; text: string };
 
@@ -120,6 +139,14 @@ export function usePortfolioApp() {
     detail?: string;
   }>({ kind: "none" });
   const [toast, setToast] = useState<Toast | null>(null);
+  const [trackerFiles, setTrackerFiles] = useState<SavedTrackerFile[]>([]);
+  const [trackerStatements, setTrackerStatements] = useState<TrackerStatementView[]>([]);
+  const [trackerCombined, setTrackerCombined] = useState<TrackerCombinedView>(() =>
+    aggregateTrackerStatements([]),
+  );
+  const [trackerHydrating, setTrackerHydrating] = useState(true);
+  const [trackerUploadBusy, setTrackerUploadBusy] = useState(false);
+  const [trackerUploadStatus, setTrackerUploadStatus] = useState("");
 
   const amfiSlotBusyRef = useRef(appSession.amfiSlotBusy);
   const amfiQueueRef = useRef(appSession.amfiQueue);
@@ -559,6 +586,75 @@ export function usePortfolioApp() {
     void hydrate();
   }, [hydrate]);
 
+  const refreshTrackerState = useCallback(async () => {
+    const entries = await loadAllTrackerEntries();
+    setTrackerFiles(entries.map((e) => e.file));
+    setTrackerStatements(buildTrackerStatementViews(entries));
+    setTrackerCombined(aggregateTrackerStatements(entries.map((e) => e.payload)));
+    return entries;
+  }, []);
+
+  const hydrateTracker = useCallback(async () => {
+    setTrackerHydrating(true);
+    try {
+      await refreshTrackerState();
+    } catch (e) {
+      setToast({ kind: "error", text: `Failed to load tracker: ${String(e)}` });
+    } finally {
+      setTrackerHydrating(false);
+    }
+  }, [refreshTrackerState]);
+
+  useEffect(() => {
+    void hydrateTracker();
+  }, [hydrateTracker]);
+
+  const processTrackerFile = useCallback(
+    async (file: File, password?: string) => {
+      setTrackerUploadBusy(true);
+      setTrackerUploadStatus(`Processing ${file.name}…`);
+      try {
+        const lines = await extractPdfLinesFromFile(file, password);
+        const result = parseAnyStatementFromLines(lines, file.name);
+        if (result.kind === "unknown") {
+          throw new Error(result.reason);
+        }
+        const payload: StoredTrackerPayload =
+          result.kind === "cams_kfin_cas"
+            ? { kind: result.kind, data: result.data }
+            : result.kind === "mf_central"
+              ? { kind: result.kind, data: result.data }
+              : result.kind === "cdsl_cas"
+                ? { kind: result.kind, data: result.data }
+                : { kind: "nps", data: result.data };
+        await saveTrackerStatement(file.name, payload, lines.join("\n"));
+        await refreshTrackerState();
+        setTrackerUploadStatus("");
+        setToast({ kind: "success", text: `Added ${file.name} to tracker.` });
+        setBottomTab("tracker");
+      } catch (e) {
+        setTrackerUploadStatus("");
+        if (e instanceof PdfPasswordRequiredError || e instanceof PdfIncorrectPasswordError) {
+          throw e;
+        }
+        setToast({ kind: "error", text: String(e) });
+        throw e;
+      } finally {
+        setTrackerUploadBusy(false);
+      }
+    },
+    [refreshTrackerState],
+  );
+
+  const removeTrackerFile = useCallback(
+    async (id: string) => {
+      await removeTrackerDoc(id);
+      await refreshTrackerState();
+      setToast({ kind: "success", text: "Statement removed from tracker." });
+    },
+    [refreshTrackerState],
+  );
+
   const processCasFile = useCallback(
     async (file: File, password?: string) => {
       setUploadBusy(true);
@@ -887,5 +983,13 @@ export function usePortfolioApp() {
     refreshNav,
     retryAmfiMapping,
     addMember,
+    trackerFiles,
+    trackerStatements,
+    trackerCombined,
+    trackerHydrating,
+    trackerUploadBusy,
+    trackerUploadStatus,
+    processTrackerFile,
+    removeTrackerFile,
   };
 }

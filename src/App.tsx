@@ -13,14 +13,19 @@ import { PortfolioChatTab } from "./components/PortfolioChatTab";
 import { ScreenerTab } from "./components/ScreenerTab";
 import { PortfolioPicker } from "./components/PortfolioPicker";
 import { SourceMappingModal } from "./components/SourceMappingModal";
+import { TrackerTab } from "./components/TrackerTab";
+import { TrackerUploadModal } from "./components/TrackerUploadModal";
+import { useBrokerMcp } from "./hooks/useBrokerMcp";
 import { usePortfolioApp } from "./hooks/usePortfolioApp";
 import { useMunshiChat } from "./hooks/useMunshiChat";
 
 export default function App() {
   const app = usePortfolioApp();
+  const broker = useBrokerMcp();
   const munshi = useMunshiChat();
   const { startNewChat, busy: aiChatBusy } = munshi;
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [trackerUploadOpen, setTrackerUploadOpen] = useState(false);
   const [accountSubTab, setAccountSubTab] = useState<AccountSubTabId>("uploaded");
   const [profilePickerOpen, setProfilePickerOpen] = useState(false);
   const [sourceMapOpen, setSourceMapOpen] = useState(false);
@@ -45,7 +50,27 @@ export default function App() {
   const showPortfolioPicker = app.bottomTab === "home" && hasData && !app.hydrating;
 
   let content;
-  if (app.bottomTab === "account") {
+  if (app.bottomTab === "tracker") {
+    content = (
+      <TrackerTab
+        trackerFiles={app.trackerFiles}
+        statements={app.trackerStatements}
+        uploadBusy={app.trackerUploadBusy}
+        hydrating={app.trackerHydrating}
+        onUploadClick={() => setTrackerUploadOpen(true)}
+        onRemove={(id) => void app.removeTrackerFile(id)}
+        brokerStates={broker.states}
+        brokerSyncs={broker.brokerSyncs}
+        brokerHydrating={broker.hydrating}
+        onBrokerAuthorize={(id) => void broker.authorize(id)}
+        onBrokerConnect={(id) => void broker.connect(id)}
+        onBrokerDisconnect={(id) => void broker.disconnect(id)}
+        onBrokerZerodhaLogin={(id) => void broker.zerodhaLogin(id)}
+        onBrokerSync={(id) => void broker.syncHoldings(id)}
+        onBrokerRemoveSync={(id) => void broker.removeSync(id)}
+      />
+    );
+  } else if (app.bottomTab === "account") {
     content =
       accountSubTab === "details" ? (
         <AccountDetailsTab
@@ -193,8 +218,11 @@ export default function App() {
         onHomeTabChange={app.setHomeTab}
         accountSubTab={accountSubTab}
         onAccountSubTabChange={setAccountSubTab}
-        onUploadClick={() => setUploadOpen(true)}
-        uploadBusy={app.uploadBusy}
+        onUploadClick={() => {
+          if (app.bottomTab === "tracker") setTrackerUploadOpen(true);
+          else setUploadOpen(true);
+        }}
+        uploadBusy={app.bottomTab === "tracker" ? app.trackerUploadBusy : app.uploadBusy}
         amfiMappingBusy={app.amfiMappingBusy}
         onAiSettingsClick={() => setAiSettingsOpen(true)}
         onAiMenuClick={() => setAiHistoryOpen(true)}
@@ -222,6 +250,14 @@ export default function App() {
         status={app.pipelineStatus}
         onClose={() => setUploadOpen(false)}
         onUpload={app.processCasFile}
+      />
+
+      <TrackerUploadModal
+        open={trackerUploadOpen}
+        busy={app.trackerUploadBusy}
+        status={app.trackerUploadStatus}
+        onClose={() => setTrackerUploadOpen(false)}
+        onProcessFile={app.processTrackerFile}
       />
 
       <SourceMappingModal

@@ -1,5 +1,6 @@
 node_modules/
 dist/
+tsconfig.tsbuildinfo
 public/benchmark-seed.json
 public/unique_schemes.csv
 .DS_Store

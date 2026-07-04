@@ -63,6 +63,7 @@ export default defineConfig({
       "/api/amfi/nav-history": { target: "http://127.0.0.1:3457", changeOrigin: true },
       "/api/amfi/portal-nav": { target: "http://127.0.0.1:3457", changeOrigin: true },
       "/api/portfolio/chat": { target: "http://127.0.0.1:3457", changeOrigin: true },
+      "/api/broker/": { target: "http://127.0.0.1:3457", changeOrigin: true },
     },
   },
   optimizeDeps: {

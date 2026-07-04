@@ -4,6 +4,31 @@ type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
 
 let pdfjsModulePromise: Promise<PdfJsModule> | null = null;
 
+export class PdfPasswordRequiredError extends Error {
+  constructor() {
+    super("This PDF is password-protected.");
+    this.name = "PdfPasswordRequiredError";
+  }
+}
+
+export class PdfIncorrectPasswordError extends Error {
+  constructor() {
+    super("Incorrect password. Try again.");
+    this.name = "PdfIncorrectPasswordError";
+  }
+}
+
+function classifyPdfPasswordError(e: unknown): PdfPasswordRequiredError | PdfIncorrectPasswordError | null {
+  const err = e as { name?: string; code?: number; message?: string };
+  if (err?.name === "PasswordException") {
+    return err.code === 2 ? new PdfIncorrectPasswordError() : new PdfPasswordRequiredError();
+  }
+  const msg = String(err?.message ?? e);
+  if (/incorrect password|wrong password|invalid password/i.test(msg)) return new PdfIncorrectPasswordError();
+  if (/password|encrypted|needpassword/i.test(msg)) return new PdfPasswordRequiredError();
+  return null;
+}
+
 async function getPdfJs(): Promise<PdfJsModule> {
   if (!pdfjsModulePromise) {
     pdfjsModulePromise = import("pdfjs-dist/legacy/build/pdf.mjs").then((pdfjsLib) => {
@@ -18,12 +43,19 @@ async function getPdfJs(): Promise<PdfJsModule> {
 export async function extractPdfLinesWithPdfJs(buffer: ArrayBuffer, password?: string): Promise<string[]> {
   const pdfjsLib = await getPdfJs();
   const data = new Uint8Array(buffer);
-  const loadingTask = pdfjsLib.getDocument({
-    data,
-    disableFontFace: true,
-    password: password?.trim() || undefined,
-  });
-  const pdf = await loadingTask.promise;
+  let pdf;
+  try {
+    const loadingTask = pdfjsLib.getDocument({
+      data,
+      disableFontFace: true,
+      password: password?.trim() || undefined,
+    });
+    pdf = await loadingTask.promise;
+  } catch (e) {
+    const classified = classifyPdfPasswordError(e);
+    if (classified) throw classified;
+    throw e;
+  }
   const fullLines: string[] = [];
 
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
@@ -52,16 +84,19 @@ export async function extractPdfLinesWithPdfJs(buffer: ArrayBuffer, password?: s
       .sort((a, b) => b - a);
     for (const k of keys) {
       const row = buckets[k].sort((a, b) => a.x - b.x);
-      let line = "";
-      let prevX = -Infinity;
+      const buf: string[] = [];
+      const flush = () => {
+        if (buf.length) {
+          const trimmed = buf.join(" ").replace(/\s+/g, " ").trim();
+          if (trimmed) fullLines.push(trimmed);
+          buf.length = 0;
+        }
+      };
       for (const cell of row) {
-        if (prevX > -Infinity && cell.x - prevX > eps * 0.8) line += " ";
-        line += cell.s;
-        prevX = cell.x + cell.s.length * 4;
-        if (cell.hasEOL) line += " ";
+        buf.push(cell.s);
+        if (cell.hasEOL) flush();
       }
-      const trimmed = line.replace(/\s+/g, " ").trim();
-      if (trimmed) fullLines.push(trimmed);
+      flush();
     }
   }
 
@@ -72,4 +107,9 @@ export async function extractPdfTextFromFile(file: File, password?: string): Pro
   const buffer = await file.arrayBuffer();
   const lines = await extractPdfLinesWithPdfJs(buffer, password);
   return lines.join("\n");
+}
+
+export async function extractPdfLinesFromFile(file: File, password?: string): Promise<string[]> {
+  const buffer = await file.arrayBuffer();
+  return extractPdfLinesWithPdfJs(buffer, password);
 }

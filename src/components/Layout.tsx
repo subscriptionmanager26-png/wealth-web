@@ -42,6 +42,17 @@ function HomeIcon({ active }: { active: boolean }) {
   );
 }
 
+function TrackerIcon({ active }: { active: boolean }) {
+  return (
+    <svg className="bottom-nav-svg" viewBox="0 0 24 24" aria-hidden>
+      <path
+        fill={active ? Wealth.orange : Wealth.textMuted}
+        d="M3 3h8v8H3V3zm10 0h8v5h-8V3zM3 13h5v8H3v-8zm7 4h11v4H10v-4zm-4 2h2v2H6v-2z"
+      />
+    </svg>
+  );
+}
+
 function ScreenerIcon({ active }: { active: boolean }) {
   return (
     <svg className="bottom-nav-svg" viewBox="0 0 24 24" aria-hidden>
@@ -125,6 +136,13 @@ export function Layout({
               </button>
             ))}
           </nav>
+        ) : bottomTab === "tracker" ? (
+          <div className="header-inner">
+            <h1 className="brand">Tracker</h1>
+            <button type="button" className="upload-btn" onClick={onUploadClick} disabled={uploadBusy}>
+              {uploadBusy ? "Processing…" : "Add PDFs"}
+            </button>
+          </div>
         ) : bottomTab === "screener" ? (
           <div className="header-inner">
             <h1 className="brand">Fund Screener</h1>
@@ -196,7 +214,15 @@ export function Layout({
           onClick={() => onBottomTabChange("home")}
         >
           <HomeIcon active={bottomTab === "home"} />
-          <span>Home</span>
+          <span>Mutual Fund</span>
+        </button>
+        <button
+          type="button"
+          className={`bottom-nav-btn ${bottomTab === "tracker" ? "bottom-nav-btn-active" : ""}`}
+          onClick={() => onBottomTabChange("tracker")}
+        >
+          <TrackerIcon active={bottomTab === "tracker"} />
+          <span>Tracker</span>
         </button>
         <button
           type="button"

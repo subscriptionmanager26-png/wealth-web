@@ -15,6 +15,7 @@ import {
   streamChatWithMistral,
   streamMistralChat,
 } from "./mistral.mjs";
+import { handleBrokerApi } from "./broker-api.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -84,6 +85,11 @@ const server = createServer(async (req, res) => {
   }
 
   try {
+    if (url.pathname.startsWith("/api/broker/")) {
+      const handled = await handleBrokerApi(req, res, url, origin, ALLOW_ORIGIN);
+      if (handled) return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/nifty/tri") {
       const body = await readBody(req);
       const upstream = await fetchNiftyTri(body);

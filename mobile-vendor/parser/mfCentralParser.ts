@@ -34,6 +34,47 @@ function isLoadSection(line: string): boolean {
   return /^load structures$/i.test(line.trim()) || /^notes$/i.test(line.trim());
 }
 
+function isMetricsOnlyTail(s: string): boolean {
+  const toks = moneyTokens(s);
+  if (toks.length < 4) return false;
+  const letters = s.replace(/[\d,.\s%₹()-]/g, "");
+  return letters.length <= 1;
+}
+
+function parseMetricsRow(line: string): {
+  units: string | null;
+  nav: string | null;
+  cost: string | null;
+  gain: string | null;
+  market: string | null;
+} {
+  const toks = moneyTokens(line);
+  const hasGainPct = /%/.test(line);
+  const gain = parsePct(line.match(/(-?\d+(?:\.\d+)?)%/)?.[1] ?? null);
+  return {
+    units: parseMoney(toks[0]!),
+    nav: parseMoney(toks[1]!),
+    cost: parseMoney(toks[2]!),
+    gain,
+    market: parseMoney(toks[toks.length - 1]!),
+  };
+}
+
+function applySchemeNameParts(nameParts: string[]): { scheme_code: string | null; scheme_name: string | null; plan_tag: string | null } {
+  const joined = nameParts.join(" ").replace(/\s+/g, " ").trim();
+  let scheme_code: string | null = null;
+  let scheme_name: string | null = joined || null;
+  let plan_tag: string | null = null;
+  const codeM = joined.match(/^(\d+[A-Z]?)-(.+)$/i) ?? joined.match(/^([A-Z0-9][\w/-]*)-(.+)$/i);
+  if (codeM) {
+    scheme_code = codeM[1]!;
+    scheme_name = codeM[2]!.trim();
+  }
+  const planLine = nameParts.find((p) => /^(regular|direct)\s+growth$/i.test(p.trim()));
+  if (planLine) plan_tag = planLine.trim();
+  return { scheme_code, scheme_name, plan_tag };
+}
+
 function parseHoldingsBlock(lines: string[]): MfHoldingRow[] {
   const holdings: MfHoldingRow[] = [];
   let amc: string | null = null;
@@ -72,76 +113,94 @@ function parseHoldingsBlock(lines: string[]): MfHoldingRow[] {
       const isin = isinM[1]!.toUpperCase();
       const afterIsin = line.slice(line.indexOf(isinM[0]) + isinM[0].length).trim();
       let scheme_code: string | null = null;
-      let scheme_name = afterIsin;
-      const codeM = afterIsin.match(/^([A-Z0-9][\w/-]*)-(.+)$/i);
-      if (codeM) {
-        scheme_code = codeM[1]!;
-        scheme_name = codeM[2]!.trim();
-      }
-
-      // Next line(s): numbers and optional plan suffix / name wrap
+      let scheme_name: string | null = null;
       let units: string | null = null;
       let nav: string | null = null;
       let cost: string | null = null;
       let gain: string | null = null;
       let market: string | null = null;
       let plan_tag: string | null = null;
-      const nameParts = [scheme_name].filter(Boolean);
-
+      const nameParts: string[] = [];
       let j = i + 1;
-      while (j < lines.length && j < i + 5) {
-        const nxt = lines[j]!;
-        if (isAmcHeader(nxt) || (ISIN_RE.test(nxt) && /^\d{5,}\s+/.test(nxt))) break;
-        if (isTxnSectionStart(nxt) || isLoadSection(nxt)) break;
-        if (/mutual fund\s*-\s*total/i.test(nxt) || /^portfolio value/i.test(nxt)) break;
 
-        const toks = moneyTokens(nxt);
-        const hasGainPct = /%/.test(nxt);
-        if (toks.length >= 4 && (hasGainPct || toks.length >= 5)) {
-          // units nav cost [gain%] market
-          units = parseMoney(toks[0]!);
-          nav = parseMoney(toks[1]!);
-          cost = parseMoney(toks[2]!);
-          if (hasGainPct) {
-            const pctTok = nxt.match(/(-?\d+(?:\.\d+)?)%/)?.[1];
-            gain = parsePct(pctTok ?? null);
-            market = parseMoney(toks[toks.length - 1]!);
-          } else if (toks.length >= 5) {
-            gain = parsePct(toks[3]!);
-            market = parseMoney(toks[4]!);
-          } else {
-            market = parseMoney(toks[3]!);
-          }
+      if (isMetricsOnlyTail(afterIsin)) {
+        const metrics = parseMetricsRow(afterIsin);
+        units = metrics.units;
+        nav = metrics.nav;
+        cost = metrics.cost;
+        gain = metrics.gain;
+        market = metrics.market;
+        while (j < lines.length && j < i + 8) {
+          const nxt = lines[j]!;
+          if (isAmcHeader(nxt) || (ISIN_RE.test(nxt) && /^\d{5,}\s+/.test(nxt))) break;
+          if (isTxnSectionStart(nxt) || isLoadSection(nxt)) break;
+          if (/mutual fund\s*-\s*total/i.test(nxt) || /^portfolio value/i.test(nxt)) break;
+          if (isMetricsOnlyTail(nxt)) break;
+          nameParts.push(nxt.trim());
           j += 1;
-          // optional name wrap / plan lines
-          while (j < lines.length && j < i + 6) {
-            const planLine = lines[j]!;
-            if (ISIN_RE.test(planLine) && /^\d{5,}\s+/.test(planLine)) break;
-            if (isAmcHeader(planLine) || isTxnSectionStart(planLine) || isLoadSection(planLine)) break;
-            if (/mutual fund\s*-\s*total/i.test(planLine) || /^portfolio value/i.test(planLine)) break;
-            if (moneyTokens(planLine).length >= 3) break;
-            if (
-              /growth|idcw|dividend|direct|regular|plan|option|fund|opportunities|cap/i.test(planLine) &&
-              planLine.length < 80
-            ) {
-              if (/growth|idcw|dividend|direct|regular|plan|option/i.test(planLine)) {
-                plan_tag = plan_tag ? `${plan_tag} ${planLine.trim()}` : planLine.trim();
+        }
+        const scheme = applySchemeNameParts(nameParts);
+        scheme_code = scheme.scheme_code;
+        scheme_name = scheme.scheme_name;
+        plan_tag = scheme.plan_tag;
+      } else {
+        scheme_name = afterIsin;
+        const codeM = afterIsin.match(/^([A-Z0-9][\w/-]*)-(.+)$/i);
+        if (codeM) {
+          scheme_code = codeM[1]!;
+          scheme_name = codeM[2]!.trim();
+        }
+        nameParts.push(scheme_name);
+
+        while (j < lines.length && j < i + 5) {
+          const nxt = lines[j]!;
+          if (isAmcHeader(nxt) || (ISIN_RE.test(nxt) && /^\d{5,}\s+/.test(nxt))) break;
+          if (isTxnSectionStart(nxt) || isLoadSection(nxt)) break;
+          if (/mutual fund\s*-\s*total/i.test(nxt) || /^portfolio value/i.test(nxt)) break;
+
+          const toks = moneyTokens(nxt);
+          const hasGainPct = /%/.test(nxt);
+          if (toks.length >= 4 && (hasGainPct || toks.length >= 5)) {
+            const metrics = parseMetricsRow(nxt);
+            units = metrics.units;
+            nav = metrics.nav;
+            cost = metrics.cost;
+            gain = metrics.gain;
+            market = metrics.market;
+            j += 1;
+            while (j < lines.length && j < i + 8) {
+              const planLine = lines[j]!;
+              if (ISIN_RE.test(planLine) && /^\d{5,}\s+/.test(planLine)) break;
+              if (isAmcHeader(planLine) || isTxnSectionStart(planLine) || isLoadSection(planLine)) break;
+              if (/mutual fund\s*-\s*total/i.test(planLine) || /^portfolio value/i.test(planLine)) break;
+              if (moneyTokens(planLine).length >= 3) break;
+              if (
+                /growth|idcw|dividend|direct|regular|plan|option|fund|opportunities|cap/i.test(planLine) &&
+                planLine.length < 80
+              ) {
+                if (/growth|idcw|dividend|direct|regular|plan|option/i.test(planLine)) {
+                  plan_tag = plan_tag ? `${plan_tag} ${planLine.trim()}` : planLine.trim();
+                }
+                nameParts.push(planLine.trim());
+                j += 1;
+                continue;
               }
-              nameParts.push(planLine.trim());
-              j += 1;
-              continue;
+              break;
             }
             break;
           }
+
+          if (!ISIN_RE.test(nxt) && moneyTokens(nxt).length < 3) {
+            nameParts.push(nxt);
+            j += 1;
+            continue;
+          }
           break;
         }
-
-        if (!ISIN_RE.test(nxt) && moneyTokens(nxt).length < 3) {
-          nameParts.push(nxt);
-          j += 1;
-          continue;
-        }
-        break;
+        const scheme = applySchemeNameParts(nameParts);
+        scheme_code = scheme.scheme_code ?? scheme_code;
+        scheme_name = scheme.scheme_name;
+        plan_tag = plan_tag ?? scheme.plan_tag;
       }
 
       holdings.push({
@@ -149,7 +208,7 @@ function parseHoldingsBlock(lines: string[]): MfHoldingRow[] {
         folio_no,
         isin,
         scheme_code,
-        scheme_name: nameParts.join(" ").replace(/\s+/g, " ").trim() || null,
+        scheme_name: scheme_name?.replace(/\s+/g, " ").trim() || null,
         closing_units: units,
         nav_inr: nav,
         cost_value_inr: cost,
@@ -355,14 +414,31 @@ export function parseMfCentralFromLines(linesIn: string[], fileName = "mf-centra
 
   let investor_name: string | null = null;
   let address: string | null = null;
-  const nameLine = lines.find((l) => /\([Hh]uf\)|\bHUF\b/.test(l) || (/^[A-Z][A-Za-z .]+$/.test(l) && l.length < 40));
-  if (nameLine && !/mutual fund|portfolio|summary/i.test(nameLine)) {
-    investor_name = nameLine.replace(/\s+SEBI has.*/i, "").trim();
+  const hufLine = lines.find((l) => /\([Hh]uf\)/.test(l));
+  if (hufLine) {
+    investor_name =
+      hufLine.match(/^(.+?\([Hh]uf\))/i)?.[1]?.trim() ?? hufLine.replace(/\s+SEBI.*/i, "").trim();
+  } else {
+    const nameLine = lines.find(
+      (l) => /\bHUF\b/.test(l) || (/^[A-Z][A-Za-z .()]+$/.test(l) && l.length < 40),
+    );
+    if (nameLine && !/mutual fund|portfolio|summary/i.test(nameLine)) {
+      investor_name = nameLine.replace(/\s+SEBI has.*/i, "").trim();
+    }
   }
-  // Prefer primary holder from txn block
-  const holderM = text.match(/Primary Holder\s+([A-Za-z .()]+?)\s+([A-Z]{5}\d{4}[A-Z])/i);
-  if (holderM) {
-    investor_name = holderM[1]!.trim();
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!/Primary Holder/i.test(lines[i]!)) continue;
+    const same = lines[i]!.match(/Primary Holder\s+([A-Za-z .()]+?)\s+([A-Z]{5}\d{4}[A-Z])/i);
+    if (same) {
+      investor_name = same[1]!.trim();
+      break;
+    }
+    const next = lines[i + 1];
+    const nextM = next?.match(/^([A-Za-z .()]+?)\s+([A-Z]{5}\d{4}[A-Z])/);
+    if (nextM) {
+      investor_name = nextM[1]!.trim();
+      break;
+    }
   }
 
   const addrParts: string[] = [];

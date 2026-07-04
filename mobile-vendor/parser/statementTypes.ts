@@ -40,6 +40,9 @@ export type DematHoldingRow = {
   client_id: string | null;
   bo_id: string | null;
   dp_name: string | null;
+  /** ELSS / lock-in lots in CDSL "Other Details" — no market price in statement */
+  is_locked?: boolean;
+  lockin_release_date?: string | null;
 };
 
 export type DematTransactionRow = {
@@ -61,6 +64,8 @@ export type NpsHoldingRow = {
   pran: string | null;
   tier: "T1" | "T2" | "unknown";
   scheme_name: string | null;
+  /** Pension Fund Manager / AMC (e.g. HDFC Pension Fund Management Limited) */
+  amc_name: string | null;
   /** NPS asset class code: E / C / G / A */
   scheme_code: string | null;
   allocation_pct: string | null;
@@ -127,6 +132,8 @@ export type ParsedCdslStatement = {
     value_inr: string | null;
   }[];
   demat_holdings: DematHoldingRow[];
+  /** Lock-in / pending demat-remat lots (no price in CDSL summary) */
+  locked_demat_holdings: DematHoldingRow[];
   demat_transactions: DematTransactionRow[];
   mf_holdings: MfHoldingRow[];
   nps_holdings: NpsHoldingRow[];
