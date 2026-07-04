@@ -1,15 +1,16 @@
 /**
- * Fetches full Nifty TRI history for bundled benchmark seed (CI / manual refresh).
+ * Daily Nifty TRI seed refresh (CI / manual).
  * Run: npm run fetch-benchmark-seed
  *
- * Resilience:
- * 1. niftyindices.com TRI API at /BackPage/getTotalReturnIndexString (not legacy .aspx)
- * 2. Optional Vercel proxy fallback
- * 3. If TRI still fails, extend existing seed via NSE daily price archives
- * 4. If nothing new, keep previous seed and exit 0
+ * Strategy (gentle on niftyindices.com):
+ * 1. Fetch only the last TRI_LOOKBACK_DAYS of TRI per index
+ * 2. Space requests by REQUEST_GAP_MS between indices
+ * 3. Merge recent points into the existing long history seed
+ * 4. If TRI fails, fall back to NSE daily price archives
+ * 5. If nothing new, keep previous seed and exit 0
  *
- * Note: the legacy path /Backpage.aspx/getTotalReturnIndexString returns homepage HTML
- * to non-browser clients. The live path is /BackPage/getTotalReturnIndexString (JSON array).
+ * Live endpoint: /BackPage/getTotalReturnIndexString (JSON array).
+ * Legacy /Backpage.aspx/... returns homepage HTML to non-browser clients.
  */
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import path from "node:path";
@@ -62,9 +63,16 @@ const NSE_LOOKBACK_DAYS = 21;
 const UA = "Mozilla/5.0 (compatible; wealth-web-benchmark-seed/1.0)";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const START = new Date(2000, 0, 1, 12, 0, 0, 0);
+/** Only pull recent TRI — full history already lives in assets/benchmark-seed.json. */
+const TRI_LOOKBACK_DAYS = 3;
+/** Pause between index requests so we do not look like a burst scraper. */
+const REQUEST_GAP_MS = 2_500;
 const END = new Date();
-const MIN_POINTS = 100;
+const START = new Date(END.getFullYear(), END.getMonth(), END.getDate() - TRI_LOOKBACK_DAYS, 12, 0, 0, 0);
+/** Minimum points for an existing series to count as usable history. */
+const MIN_HISTORY_POINTS = 100;
+/** Minimum points required from a recent TRI pull. */
+const MIN_RECENT_POINTS = 1;
 
 function formatNiftyApiDate(d) {
   const dd = String(d.getDate()).padStart(2, "0");
@@ -167,13 +175,13 @@ async function fetchIndex(indexName) {
       throw new Error(`${label} invalid JSON: ${e instanceof Error ? e.message : e}`);
     }
     const points = parseTriPayload(payload);
-    if (points.length < MIN_POINTS) throw new Error(`${label} too few points (${points.length})`);
+    if (points.length < MIN_RECENT_POINTS) throw new Error(`${label} too few points (${points.length})`);
     return points;
   }
 
-  // 1) Direct Nifty (with retries inside fetchNiftyTri)
+  // 1) Direct Nifty (few retries — daily job should stay gentle)
   try {
-    const res = await fetchNiftyTri(postBody, { retries: 3, timeoutMs: 45000 });
+    const res = await fetchNiftyTri(postBody, { retries: 2, timeoutMs: 30000 });
     lastStatus = res.status;
     const points = await readTriResponse(res, "direct");
     return { points, source: "direct" };
@@ -197,10 +205,24 @@ async function fetchIndex(indexName) {
   throw new Error(`Nifty TRI fetch failed for ${indexName}: ${lastError}${lastStatus ? ` (status ${lastStatus})` : ""}`);
 }
 
+/** Merge recent TRI points into long history (recent wins on the same calendar day). */
+function mergePoints(existing, recent) {
+  const byDay = new Map();
+  for (const pt of existing ?? []) {
+    if (!Array.isArray(pt) || pt.length < 2) continue;
+    byDay.set(dayKeyFromMs(pt[0]), [pt[0], pt[1]]);
+  }
+  for (const pt of recent ?? []) {
+    if (!Array.isArray(pt) || pt.length < 2) continue;
+    byDay.set(dayKeyFromMs(pt[0]), [pt[0], pt[1]]);
+  }
+  return [...byDay.values()].sort((a, b) => a[0] - b[0]);
+}
+
 function keepPrevious(indices, existing, id, failures, apiName, msg) {
   failures.push({ id, apiName, error: msg });
   const prev = existing.indices?.[id];
-  if (Array.isArray(prev) && prev.length >= MIN_POINTS) {
+  if (Array.isArray(prev) && prev.length >= MIN_HISTORY_POINTS) {
     indices[id] = prev;
     console.warn(`  FAILED — kept previous ${prev.length} points. ${msg}`);
     return 1;
@@ -307,7 +329,7 @@ async function extendSeedFromNseArchives(existingIndices) {
 
   for (const { id } of BENCHMARK_INDEXES) {
     const prev = Array.isArray(existingIndices[id]) ? [...existingIndices[id]] : [];
-    if (prev.length < MIN_POINTS) continue;
+    if (prev.length < MIN_HISTORY_POINTS) continue;
     prev.sort((a, b) => a[0] - b[0]);
     const prices = priceById.get(id);
     if (!prices?.size) continue;
@@ -358,10 +380,14 @@ async function main() {
   let refreshed = 0;
   let reused = 0;
   const failures = [];
-  /** Stop hammering Nifty after consecutive hard failures (403 / timeout / proxy down). */
-  const CIRCUIT_BREAK_AFTER = 2;
+  /** Stop after a few hard failures so we fall through to NSE instead of hammering. */
+  const CIRCUIT_BREAK_AFTER = 3;
   let consecutiveFailures = 0;
   let circuitOpen = false;
+
+  console.log(
+    `TRI window: ${formatNiftyApiDate(START)} → ${formatNiftyApiDate(END)} (${TRI_LOOKBACK_DAYS} days), gap ${REQUEST_GAP_MS}ms`,
+  );
 
   for (let i = 0; i < BENCHMARK_INDEXES.length; i += 1) {
     const { id, apiName } = BENCHMARK_INDEXES[i];
@@ -374,11 +400,15 @@ async function main() {
     console.log(`Fetching ${apiName}…`);
     try {
       const { points, source } = await fetchIndex(apiName);
-      indices[id] = points;
+      const prev = Array.isArray(existing.indices?.[id]) ? existing.indices[id] : [];
+      const merged = mergePoints(prev, points);
+      indices[id] = merged;
       refreshed += 1;
       consecutiveFailures = 0;
+      const first = points[0] ? new Date(points[0][0]).toISOString().slice(0, 10) : "?";
+      const last = points.at(-1) ? new Date(points.at(-1)[0]).toISOString().slice(0, 10) : "?";
       console.log(
-        `  ${points.length} daily points via ${source} (${points[0] ? new Date(points[0][0]).toISOString().slice(0, 10) : "?"} → ${points.at(-1) ? new Date(points.at(-1)[0]).toISOString().slice(0, 10) : "?"})`,
+        `  +${points.length} recent via ${source} (${first} → ${last}); series now ${merged.length} points`,
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -392,11 +422,11 @@ async function main() {
       }
     }
     if (!circuitOpen && i < BENCHMARK_INDEXES.length - 1) {
-      await new Promise((r) => setTimeout(r, 600));
+      await new Promise((r) => setTimeout(r, REQUEST_GAP_MS));
     }
   }
 
-  const withData = Object.values(indices).filter((p) => Array.isArray(p) && p.length >= MIN_POINTS).length;
+  const withData = Object.values(indices).filter((p) => Array.isArray(p) && p.length >= MIN_HISTORY_POINTS).length;
   if (withData === 0) {
     throw new Error(
       `No benchmark indices have usable data (refreshed=${refreshed}, failures=${failures.length}). Nifty may be blocking this network.`,
@@ -427,7 +457,7 @@ async function main() {
           source: "nse-archives-price-return-extension",
           note: "TRI API blocked; extended prior TRI levels using NSE price-index daily returns",
           indexCount: BENCHMARK_INDEXES.length,
-          fetched: Object.values(nse.indices).filter((p) => Array.isArray(p) && p.length >= MIN_POINTS).length,
+          fetched: Object.values(nse.indices).filter((p) => Array.isArray(p) && p.length >= MIN_HISTORY_POINTS).length,
           refreshed: nse.extended,
           reused: withData - nse.extended,
           nseArchiveDays: nse.days,
@@ -481,6 +511,9 @@ async function main() {
     lastAttemptAt: generatedAt,
     lastAttemptOk: true,
     source: NIFTY_TRI,
+    mode: "recent-merge",
+    triLookbackDays: TRI_LOOKBACK_DAYS,
+    requestGapMs: REQUEST_GAP_MS,
     indexCount: BENCHMARK_INDEXES.length,
     fetched: withData,
     refreshed,
