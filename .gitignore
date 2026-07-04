@@ -6,3 +6,16 @@ public/unique_schemes.csv
 .vercel
 .env
 .env.local
+
+# Local benchmarks / scratch (may use env keys; never commit secrets)
+benchmark-mistral-latency*.mjs
+
+# Never commit personal statements or parse dumps
+**/*raw_extracted*
+**/*_CAS_*.pdf
+**/CasDocument*.pdf
+**/*PRAN*
+**/out/
+**/data/*.pdf
+**/data/*holdings*.csv
+**/data/*transactions*.csv

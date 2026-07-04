@@ -16,7 +16,8 @@
     "build": "npm run vendor-mobile && npm run sync-assets && npm run patch-vendor && vite build",
     "start": "node server/proxy.mjs",
     "preview": "npm run start",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "tsc -b --noEmit",
+    "statement-demo": "npx tsx scripts/statement-demo-server.ts"
   },
   "dependencies": {
     "decimal.js": "^10.6.0",

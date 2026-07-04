@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-export async function extractPdfLinesWithPdfJs(buffer: ArrayBuffer): Promise<string[]> {
+export async function extractPdfLinesWithPdfJs(buffer: ArrayBuffer, password?: string): Promise<string[]> {
   const require = createRequire(import.meta.url);
   const pdfRoot = dirname(require.resolve("pdfjs-dist/package.json"));
   const standardFontDataUrl = pathToFileURL(join(pdfRoot, "standard_fonts")).href + "/";
@@ -16,6 +16,7 @@ export async function extractPdfLinesWithPdfJs(buffer: ArrayBuffer): Promise<str
   const data = new Uint8Array(buffer);
   const loadingTask = pdfjsLib.getDocument({
     data,
+    password: password || undefined,
     standardFontDataUrl,
     disableFontFace: true,
   });

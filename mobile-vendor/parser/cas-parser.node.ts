@@ -9,15 +9,19 @@ import { basename } from "node:path";
 import { extractPdfLinesWithPdfJs } from "./extractPdfLinesPdfjs";
 import { parseCASFromExtractedLines, type ParsedCAS } from "./cas-parser";
 
-export async function parseCASBufferNode(buffer: ArrayBuffer, fileName = "cas.pdf"): Promise<ParsedCAS> {
-  const lines = await extractPdfLinesWithPdfJs(buffer);
+export async function parseCASBufferNode(
+  buffer: ArrayBuffer,
+  fileName = "cas.pdf",
+  password?: string,
+): Promise<ParsedCAS> {
+  const lines = await extractPdfLinesWithPdfJs(buffer, password);
   return parseCASFromExtractedLines(lines, fileName);
 }
 
-export async function parseCASFile(filePath: string): Promise<ParsedCAS> {
+export async function parseCASFile(filePath: string, password?: string): Promise<ParsedCAS> {
   const buf = await readFile(filePath);
   const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-  return parseCASBufferNode(ab, basename(filePath));
+  return parseCASBufferNode(ab, basename(filePath), password);
 }
 
 export type { ParsedCAS, UnitsReconciliation } from "./cas-parser";
