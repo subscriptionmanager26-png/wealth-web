@@ -6,11 +6,20 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import type { Components } from "react-markdown";
 
+import { RenderBlocks } from "./chatBlocks/RenderBlocks";
+import { blocksToPlainText } from "../lib/chatBlocks/parse";
+import { ToolDataProvider } from "../lib/chatBlocks/ToolDataContext";
+import type { Block } from "../lib/chatBlocks/types";
+import type { ToolDataStore } from "../lib/portfolioTools/toolData";
 import { normalizeChatMarkdown } from "../lib/normalizeChatMarkdown";
 
 type Props = {
   content: string;
+  blocks?: Block[];
+  toolData?: ToolDataStore;
   streaming?: boolean;
+  /** When false (default), always render classic markdown even if blocks exist in history. */
+  generativeUi?: boolean;
 };
 
 function CodeBlock({ children, className }: { children?: ReactNode; className?: string }) {
@@ -60,22 +69,40 @@ const markdownComponents: Components = {
   },
 };
 
-export function ChatMessageContent({ content, streaming }: Props) {
-  const markdown = useMemo(() => normalizeChatMarkdown(content), [content]);
+export function ChatMessageContent({ content, blocks, toolData, streaming, generativeUi = false }: Props) {
+  const hasBlocks = Boolean(blocks?.length);
+  const markdownSource = useMemo(() => {
+    if (generativeUi && hasBlocks) return "";
+    if (!generativeUi && hasBlocks && blocks?.length) {
+      const plain = blocksToPlainText(blocks);
+      if (plain.trim()) return plain;
+    }
+    return content;
+  }, [blocks, content, generativeUi, hasBlocks]);
+  const markdown = useMemo(() => normalizeChatMarkdown(markdownSource), [markdownSource]);
+  const showBlocks = generativeUi && hasBlocks;
 
-  if (!markdown && !streaming) return null;
+  if (!showBlocks && !markdown && !streaming) return null;
+
+  const body = showBlocks ? (
+    <ToolDataProvider value={toolData}>
+      <RenderBlocks blocks={blocks!} />
+    </ToolDataProvider>
+  ) : markdown ? (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
+      rehypePlugins={[rehypeKatex]}
+      components={markdownComponents}
+    >
+      {markdown}
+    </ReactMarkdown>
+  ) : null;
 
   return (
-    <div className={`portfolio-chat-markdown${streaming ? " portfolio-chat-markdown-streaming" : ""}`}>
-      {markdown ? (
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
-          rehypePlugins={[rehypeKatex]}
-          components={markdownComponents}
-        >
-          {markdown}
-        </ReactMarkdown>
-      ) : null}
+    <div
+      className={`portfolio-chat-markdown${streaming ? " portfolio-chat-markdown-streaming" : ""}${showBlocks ? " portfolio-chat-has-blocks" : ""}`}
+    >
+      {body}
       {streaming ? <span className="portfolio-chat-cursor" aria-hidden /> : null}
     </div>
   );

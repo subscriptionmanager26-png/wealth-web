@@ -25,6 +25,7 @@ type ChatProxyBody = {
   userContent?: string;
   toolChoice?: "auto" | "required";
   answerFromToolsOnly?: boolean;
+  blocksAnswer?: boolean;
 };
 
 export async function postChatRequest(

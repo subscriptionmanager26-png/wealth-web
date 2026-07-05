@@ -23,6 +23,17 @@ import {
 import { executePortfolioTool, type PortfolioSnapshot } from "./portfolioTools";
 import { postChatRequest, streamChatRequest } from "./chatApiRoute";
 import { diagLog } from "./diagnosticsLog";
+import { mergeToolData, type ToolDataPayload, type ToolDataStore } from "./portfolioTools/toolData";
+import { hydrateToolDataFromSnapshot } from "./portfolioTools/hydrateToolData";
+import { blocksToPlainText, parseBlocksDocument } from "./chatBlocks/parse";
+import type { AnswerTemplate } from "./chatBlocks/answerTemplates";
+import { inferAnswerTemplate } from "./chatBlocks/questionRouter";
+import {
+  hasRenderableToolData,
+  mergeBlocksWithToolData,
+  synthesizeBlocksFromToolData,
+} from "./chatBlocks/synthesizeFromToolData";
+import type { Block } from "./chatBlocks/types";
 import type { ChatMessage } from "./portfolioChat";
 
 export type AgentMessage = {
@@ -61,6 +72,8 @@ type ChatRequest = {
 
 export type AgentProgressCallbacks = {
   onDelta: (text: string) => void;
+  onBlocks?: (blocks: Block[], fallbackText: string, template?: AnswerTemplate) => void;
+  onToolData?: (payload: ToolDataPayload) => void;
   onSteps: (steps: AgentStep[]) => void | Promise<void>;
   onClarification?: (request: ClarificationRequest) => Promise<ClarificationAnswers | null>;
 };
@@ -131,6 +144,95 @@ async function fetchToolTurn(
   return data;
 }
 
+async function fetchBlocksAnswer(
+  messages: AgentMessage[],
+  apiKey: string | undefined,
+  memoryContext: string | undefined,
+  signal?: AbortSignal,
+): Promise<string> {
+  throwIfAborted(signal);
+  const res = await postChatRequest(
+    { messages, blocksAnswer: true, apiKey, memoryContext },
+    apiKey,
+    signal,
+  );
+  const data = (await res.json().catch(() => ({}))) as { content?: string; error?: string };
+  if (!res.ok) {
+    throw new Error(typeof data?.error === "string" ? data.error : `Request failed (${res.status})`);
+  }
+  return String(data.content ?? "").trim();
+}
+
+function deliverBlocksAnswer(
+  raw: string,
+  onBlocks: NonNullable<AgentProgressCallbacks["onBlocks"]>,
+  toolData?: ToolDataStore,
+  template?: AnswerTemplate,
+  snapshot?: PortfolioSnapshot,
+): boolean {
+  const doc = parseBlocksDocument(raw);
+  const resolvedTemplate = doc?.template ?? template;
+  const hydrated = snapshot && toolData ? hydrateToolDataFromSnapshot(snapshot, toolData) : toolData;
+  if (hydrated && hasRenderableToolData(hydrated)) {
+    const blocks = mergeBlocksWithToolData(doc?.blocks ?? null, hydrated, resolvedTemplate, snapshot);
+    if (blocks.length) {
+      onBlocks(blocks, raw.trim() || blocksToPlainText(blocks), resolvedTemplate);
+      return true;
+    }
+  }
+
+  if (doc?.blocks.length) {
+    onBlocks(doc.blocks, blocksToPlainText(doc.blocks), resolvedTemplate);
+    return true;
+  }
+
+  return false;
+}
+
+async function finalizeStructuredAnswer(
+  agentMessages: AgentMessage[],
+  input: ChatRequest,
+  memoryContext: string | undefined,
+  callbacks: Pick<AgentProgressCallbacks, "onDelta" | "onBlocks">,
+  toolData: ToolDataStore,
+  answerTemplate: AnswerTemplate,
+  signal?: AbortSignal,
+): Promise<void> {
+  const { onDelta, onBlocks } = callbacks;
+  const hydrated = hydrateToolDataFromSnapshot(input.snapshot, toolData);
+
+  if (hydrated && hasRenderableToolData(hydrated) && onBlocks) {
+    try {
+      const raw = await fetchBlocksAnswer(agentMessages, input.apiKey, memoryContext, signal);
+      if (deliverBlocksAnswer(raw, onBlocks, hydrated, answerTemplate, input.snapshot)) return;
+    } catch (e) {
+      diagLog("chat", "Blocks answer failed — using template layout from tool data", {
+        error: e instanceof Error ? e.message : String(e),
+        template: answerTemplate,
+      });
+    }
+    const blocks = synthesizeBlocksFromToolData(hydrated, undefined, answerTemplate, input.snapshot);
+    onBlocks(blocks, blocksToPlainText(blocks), answerTemplate);
+    return;
+  }
+
+  if (!onBlocks) {
+    await streamAgentTurn(agentMessages, input.apiKey, memoryContext, onDelta, signal);
+    return;
+  }
+
+  try {
+    const raw = await fetchBlocksAnswer(agentMessages, input.apiKey, memoryContext, signal);
+    if (deliverBlocksAnswer(raw, onBlocks, hydrated, answerTemplate, input.snapshot)) return;
+    if (raw) await streamTextGradually(raw, onDelta, signal);
+  } catch (e) {
+    diagLog("chat", "Blocks answer failed — falling back to stream", {
+      error: e instanceof Error ? e.message : String(e),
+    });
+    await streamAgentTurn(agentMessages, input.apiKey, memoryContext, onDelta, signal);
+  }
+}
+
 async function streamAgentTurn(
   messages: AgentMessage[],
   apiKey: string | undefined,
@@ -170,6 +272,7 @@ async function executePlannedTools(
   agentMessages: AgentMessage[],
   steps: AgentStep[],
   onSteps: AgentProgressCallbacks["onSteps"],
+  onToolData: AgentProgressCallbacks["onToolData"],
   signal?: AbortSignal,
 ): Promise<AgentStep[]> {
   if (!planned.length) return steps;
@@ -214,16 +317,19 @@ async function executePlannedTools(
     ];
     await publishSteps(onSteps, nextSteps);
 
-    const result = executePortfolioTool(input.snapshot, tc.function.name, approvedArgs);
+    const { text, data } = executePortfolioTool(input.snapshot, tc.function.name, approvedArgs);
+    if (data?.length) {
+      for (const payload of data) onToolData?.(payload);
+    }
     agentMessages.push({
       role: "tool",
       name: tc.function.name,
-      content: result,
+      content: text,
       tool_call_id: tc.id,
     });
 
     await ensureMinStepDuration(toolStart, MIN_TOOL_MS);
-    const lineCount = result.split("\n").filter((l) => l.trim() && !l.startsWith("===")).length;
+    const lineCount = text.split("\n").filter((l) => l.trim() && !l.startsWith("===")).length;
     nextSteps = patchStep(nextSteps, toolStepId, {
       status: "done",
       endedAt: Date.now(),
@@ -242,6 +348,7 @@ async function runPlanningPhase(
   steps: AgentStep[],
   onSteps: AgentProgressCallbacks["onSteps"],
   onClarification: AgentProgressCallbacks["onClarification"],
+  onToolData: AgentProgressCallbacks["onToolData"],
   signal?: AbortSignal,
 ): Promise<{ steps: AgentStep[]; plan: AgentPlan | null }> {
   const planId = newStepId();
@@ -340,6 +447,7 @@ async function runPlanningPhase(
     agentMessages,
     nextSteps,
     onSteps,
+    onToolData,
     signal,
   );
 
@@ -347,18 +455,34 @@ async function runPlanningPhase(
 }
 
 export async function runPortfolioChatAgent(input: ChatRequest, callbacks: AgentProgressCallbacks): Promise<void> {
-  const { onDelta, onSteps, onClarification } = callbacks;
+  const { onDelta, onBlocks, onToolData, onSteps, onClarification } = callbacks;
   const { signal, memoryContext } = input;
   let steps: AgentStep[] = [];
+  let toolData: ToolDataStore = {};
+  const recordToolData = (payload: ToolDataPayload) => {
+    toolData = mergeToolData(toolData, payload);
+    onToolData?.(payload);
+  };
 
   const agentMessages: AgentMessage[] = [
     ...input.history.map((m) => ({ role: m.role, content: m.content })),
     { role: "user", content: input.question.trim() },
   ];
 
+  let answerTemplate: AnswerTemplate = inferAnswerTemplate(input.question);
+
   try {
-    const planning = await runPlanningPhase(input, agentMessages, steps, onSteps, onClarification, signal);
+    const planning = await runPlanningPhase(
+      input,
+      agentMessages,
+      steps,
+      onSteps,
+      onClarification,
+      recordToolData,
+      signal,
+    );
     steps = planning.steps;
+    if (planning.plan?.answerTemplate) answerTemplate = planning.plan.answerTemplate;
   } catch (e) {
     if (e instanceof ChatAbortError) {
       steps = completeRunningSteps(steps);
@@ -478,16 +602,19 @@ export async function runPortfolioChatAgent(input: ChatRequest, callbacks: Agent
         ];
         await publishSteps(onSteps, steps);
 
-        const result = executePortfolioTool(input.snapshot, tc.function.name, approvedArgs);
+    const { text, data } = executePortfolioTool(input.snapshot, tc.function.name, approvedArgs);
+    if (data?.length) {
+      for (const payload of data) recordToolData(payload);
+    }
         agentMessages.push({
           role: "tool",
           name: tc.function.name,
-          content: result,
+          content: text,
           tool_call_id: tc.id,
         });
 
         await ensureMinStepDuration(toolStart, MIN_TOOL_MS);
-        const lineCount = result.split("\n").filter((l) => l.trim() && !l.startsWith("===")).length;
+        const lineCount = text.split("\n").filter((l) => l.trim() && !l.startsWith("===")).length;
         steps = patchStep(steps, toolStepId, {
           status: "done",
           endedAt: Date.now(),
@@ -500,27 +627,8 @@ export async function runPortfolioChatAgent(input: ChatRequest, callbacks: Agent
     }
 
     const direct = (turn.content ?? turn.message?.content ?? "").trim();
-    if (direct && hasToolResultsSinceLastUser(agentMessages)) {
-      const writeId = newStepId();
-      const writeStart = Date.now();
-      steps = [
-        ...steps,
-        {
-          id: writeId,
-          kind: "write",
-          status: "running",
-          label: "Writing response",
-          startedAt: writeStart,
-        },
-      ];
-      await publishSteps(onSteps, steps);
-      await ensureMinStepDuration(writeStart);
-      await streamTextGradually(direct, onDelta, signal);
-      steps = patchStep(steps, writeId, { status: "done", endedAt: Date.now() });
-      await publishSteps(onSteps, steps);
-      steps = completeRunningSteps(steps);
-      await publishSteps(onSteps, steps);
-      return;
+    if (hasToolResultsSinceLastUser(agentMessages) && !toolCalls?.length) {
+      break;
     }
 
     if (direct && !hasToolResultsSinceLastUser(agentMessages)) {
@@ -563,18 +671,19 @@ export async function runPortfolioChatAgent(input: ChatRequest, callbacks: Agent
   ];
   await publishSteps(onSteps, steps);
 
-  let firstDelta = false;
-  await streamAgentTurn(agentMessages, input.apiKey, memoryContext, async (delta) => {
-    if (!firstDelta) {
-      firstDelta = true;
-      await ensureMinStepDuration(writeStart);
-    }
-    onDelta(delta);
-  }, signal);
+  const hydrated = hydrateToolDataFromSnapshot(input.snapshot, toolData);
 
-  if (!firstDelta) {
-    await ensureMinStepDuration(writeStart);
-  }
+  await ensureMinStepDuration(writeStart);
+  await finalizeStructuredAnswer(
+    agentMessages,
+    input,
+    memoryContext,
+    { onDelta, onBlocks },
+    hydrated,
+    answerTemplate,
+    signal,
+  );
+
   steps = patchStep(steps, writeId, { status: "done", endedAt: Date.now() });
   steps = completeRunningSteps(steps);
   await publishSteps(onSteps, steps);

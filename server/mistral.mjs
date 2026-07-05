@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { MUNSHI_TOOL_SCHEMAS } from "./munshiToolSchemas.mjs";
+import { CHAT_BLOCKS_ANSWER_INSTRUCTION } from "./chatBlocksSchema.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions";
@@ -279,6 +280,41 @@ export async function streamMistralChat({
 
   if (!answer.trim()) throw new Error("Mistral returned an empty response");
   return { answer: answer.trim(), model };
+}
+
+/** Final answer as structured UI blocks (JSON). */
+export async function mistralBlocksAnswer({ messages, apiKey: apiKeyInput, memoryContext }) {
+  const apiKey = resolveApiKey(apiKeyInput);
+  const mistralMessages = [
+    {
+      role: "system",
+      content:
+        buildSystemPrompt(memoryContext, { answerFromToolsOnly: true }) + CHAT_BLOCKS_ANSWER_INSTRUCTION,
+    },
+    ...normalizeAgentMessages(messages),
+  ];
+
+  const res = await fetch(MISTRAL_API_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: DEFAULT_MODEL,
+      messages: mistralMessages,
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+    }),
+  });
+
+  const text = await res.text();
+  if (!res.ok) await readMistralError(res, text);
+
+  const data = JSON.parse(text);
+  const content = data?.choices?.[0]?.message?.content?.trim() ?? "";
+  if (!content) throw new Error("Mistral returned an empty response");
+  return { content, model: data?.model ?? DEFAULT_MODEL };
 }
 
 /** @deprecated Legacy full-context chat */

@@ -15,6 +15,12 @@ import {
   searchMarketFunds,
 } from "./marketHandlers";
 import type { PortfolioSnapshot, PortfolioToolName } from "./types";
+import { buildAllToolData, type ToolDataPayload } from "./toolData";
+
+export type ToolExecutionResult = {
+  text: string;
+  data: ToolDataPayload[] | null;
+};
 
 const COMPARISON_FRAMES: TimeFrame[] = ["MTD", "1M", "3M", "6M", "1Y", "3Y", "5Y"];
 
@@ -399,84 +405,109 @@ export function executePortfolioTool(
   snapshot: PortfolioSnapshot,
   name: string,
   args: Record<string, unknown> = {},
-): string {
+): ToolExecutionResult {
   const tool = name as PortfolioToolName;
+  let text: string;
   switch (tool) {
     case "list_available_data":
-      return listAvailableData(snapshot);
+      text = listAvailableData(snapshot);
+      break;
     case "get_portfolio_summary":
-      return getPortfolioSummary(snapshot);
+      text = getPortfolioSummary(snapshot);
+      break;
     case "get_portfolio_performance":
-      return getPortfolioPerformance(snapshot, {
+      text = getPortfolioPerformance(snapshot, {
         include_calendar_years: Boolean(args.include_calendar_years),
         frames: Array.isArray(args.frames) ? args.frames.map(String) : undefined,
+        start_date: typeof args.start_date === "string" ? args.start_date : undefined,
+        end_date: typeof args.end_date === "string" ? args.end_date : undefined,
+        return_mode: typeof args.return_mode === "string" ? args.return_mode : undefined,
       });
+      break;
     case "get_benchmark_comparison":
-      return getBenchmarkComparison(snapshot, {
+      text = getBenchmarkComparison(snapshot, {
         benchmark_id: typeof args.benchmark_id === "string" ? args.benchmark_id : undefined,
         frames: Array.isArray(args.frames) ? args.frames.map(String) : undefined,
+        start_date: typeof args.start_date === "string" ? args.start_date : undefined,
+        end_date: typeof args.end_date === "string" ? args.end_date : undefined,
+        return_mode: typeof args.return_mode === "string" ? args.return_mode : undefined,
       });
+      break;
     case "list_benchmark_indices":
-      return listBenchmarkIndices(snapshot);
+      text = listBenchmarkIndices(snapshot);
+      break;
     case "get_benchmark_returns":
-      return getBenchmarkReturns(snapshot, {
+      text = getBenchmarkReturns(snapshot, {
         benchmark_id: typeof args.benchmark_id === "string" ? args.benchmark_id : undefined,
         frames: Array.isArray(args.frames) ? args.frames.map(String) : undefined,
       });
+      break;
     case "get_asset_allocation":
-      return getAssetAllocation(snapshot);
+      text = getAssetAllocation(snapshot);
+      break;
     case "get_portfolio_fundamentals":
-      return getPortfolioFundamentals(snapshot);
+      text = getPortfolioFundamentals(snapshot);
+      break;
     case "get_holdings":
-      return getHoldings(snapshot, {
+      text = getHoldings(snapshot, {
         sort_by: typeof args.sort_by === "string" ? args.sort_by : undefined,
         order: typeof args.order === "string" ? args.order : undefined,
         limit: typeof args.limit === "number" ? args.limit : undefined,
         asset_class: typeof args.asset_class === "string" ? args.asset_class : undefined,
         category: typeof args.category === "string" ? args.category : undefined,
       });
+      break;
     case "get_best_worst_funds":
-      return getBestWorstFunds(snapshot, {
+      text = getBestWorstFunds(snapshot, {
         mode: typeof args.mode === "string" ? args.mode : undefined,
         limit: typeof args.limit === "number" ? args.limit : undefined,
         sort_by: typeof args.sort_by === "string" ? args.sort_by : undefined,
       });
+      break;
     case "get_fund_details":
-      return getFundDetails(snapshot, {
+      text = getFundDetails(snapshot, {
         fund_name_query: typeof args.fund_name_query === "string" ? args.fund_name_query : undefined,
         rank_by_weight: typeof args.rank_by_weight === "number" ? args.rank_by_weight : undefined,
         limit: typeof args.limit === "number" ? args.limit : undefined,
       });
+      break;
     case "search_market_funds":
-      return searchMarketFunds(snapshot, {
+      text = searchMarketFunds(snapshot, {
         query: typeof args.query === "string" ? args.query : undefined,
         category: typeof args.category === "string" ? args.category : undefined,
         sort_by: typeof args.sort_by === "string" ? args.sort_by : undefined,
         limit: typeof args.limit === "number" ? args.limit : undefined,
       });
+      break;
     case "get_market_fund_details":
-      return getMarketFundDetails(snapshot, {
+      text = getMarketFundDetails(snapshot, {
         scheme_code: typeof args.scheme_code === "string" ? args.scheme_code : undefined,
         name_query: typeof args.name_query === "string" ? args.name_query : undefined,
         limit: typeof args.limit === "number" ? args.limit : undefined,
       });
+      break;
     case "get_sector_exposure":
-      return getSectorExposure(snapshot, {
+      text = getSectorExposure(snapshot, {
         limit: typeof args.limit === "number" ? args.limit : undefined,
         sector_query: typeof args.sector_query === "string" ? args.sector_query : undefined,
       });
+      break;
     case "get_stock_exposure":
-      return getStockExposure(snapshot, {
+      text = getStockExposure(snapshot, {
         limit: typeof args.limit === "number" ? args.limit : undefined,
         stock_query: typeof args.stock_query === "string" ? args.stock_query : undefined,
       });
+      break;
     case "get_year_wise_returns":
-      return getYearWiseReturns(snapshot, {
+      text = getYearWiseReturns(snapshot, {
         years: typeof args.years === "number" ? args.years : undefined,
       });
+      break;
     case "get_risk_metrics":
-      return getRiskMetrics(snapshot);
+      text = getRiskMetrics(snapshot);
+      break;
     default:
-      return `Unknown tool: ${name}`;
+      text = `Unknown tool: ${name}`;
   }
+  return { text, data: buildAllToolData(snapshot, name, args) };
 }

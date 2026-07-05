@@ -1,10 +1,19 @@
 import { postChatRequest, streamChatRequest } from "./chatApiRoute";
 import type { AgentStep } from "./agentSteps";
+import type { AnswerTemplate } from "./chatBlocks/answerTemplates";
+import type { Block } from "./chatBlocks/types";
+import type { ToolDataStore } from "./portfolioTools/toolData";
 
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /** Structured UI blocks for assistant replies (Phase 1+). */
+  blocks?: Block[];
+  /** Structured data from tools for wealth widgets (Phase 2). */
+  toolData?: ToolDataStore;
+  /** Generative UI answer template (dashboard, comparison, etc.). */
+  answerTemplate?: AnswerTemplate;
   /** Cursor-style activity trace (tool calls + thinking steps). */
   steps?: AgentStep[];
 };

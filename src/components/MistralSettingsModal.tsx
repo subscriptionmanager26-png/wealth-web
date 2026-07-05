@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { maskMistralApiKey } from "../lib/mistralApiKey";
+import type { MunshiAnswerUi } from "../lib/munshiUiSettings";
 import type { MemoryJobProgress } from "../lib/munshiMemoryScheduler";
 import { MunshiMemoryPanel } from "./MunshiMemoryPanel";
 
@@ -12,6 +13,8 @@ type Props = {
   onClearKey: () => boolean | Promise<boolean>;
   memoryJob: MemoryJobProgress;
   onRunMemoryNow: () => void | Promise<void>;
+  answerUi: MunshiAnswerUi;
+  onAnswerUiChange: (ui: MunshiAnswerUi) => boolean | Promise<boolean>;
 };
 
 export function MistralSettingsModal({
@@ -22,6 +25,8 @@ export function MistralSettingsModal({
   onClearKey,
   memoryJob,
   onRunMemoryNow,
+  answerUi,
+  onAnswerUiChange,
 }: Props) {
   const [keyInput, setKeyInput] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -112,31 +117,69 @@ export function MistralSettingsModal({
             </div>
           </div>
           {error ? <p className="portfolio-chat-error">{error}</p> : null}
+
+          <div className="mistral-settings-help mistral-settings-help-inline">
+            <h3>How to get a Mistral API key</h3>
+            <ol>
+              <li>
+                Open the{" "}
+                <a href="https://console.mistral.ai/" target="_blank" rel="noopener noreferrer">
+                  Mistral AI Console
+                </a>
+                .
+              </li>
+              <li>Sign up or log in to your Mistral account.</li>
+              <li>
+                Go to <strong>API keys</strong> in the left sidebar (or Workspace → API keys).
+              </li>
+              <li>Click <strong>Create new key</strong>, give it a name, and copy the key.</li>
+              <li>Paste the key above and tap <strong>Save key</strong>.</li>
+            </ol>
+            <p className="text-muted">
+              Mistral bills API usage to your account. Keep the key private — anyone with it can use your quota.
+            </p>
+          </div>
+        </section>
+
+        <section className="mistral-settings-section">
+          <h3>Answer display</h3>
+          <p className="text-muted mistral-settings-note">
+            Choose how Munshi Ji formats responses. Classic markdown is the default; generative UI is an optional beta with
+            charts and structured widgets.
+          </p>
+          <div className="mistral-route-options" role="radiogroup" aria-label="Munshi answer display">
+            <label className="mistral-route-option">
+              <input
+                type="radio"
+                name="munshi-answer-ui"
+                value="markdown"
+                checked={answerUi === "markdown"}
+                onChange={() => void onAnswerUiChange("markdown")}
+              />
+              <span>
+                <strong>Classic markdown</strong>
+                <span className="text-muted mistral-route-option-detail">Default — readable prose with tables and lists.</span>
+              </span>
+            </label>
+            <label className="mistral-route-option">
+              <input
+                type="radio"
+                name="munshi-answer-ui"
+                value="generative"
+                checked={answerUi === "generative"}
+                onChange={() => void onAnswerUiChange("generative")}
+              />
+              <span>
+                <strong>Generative UI (beta)</strong>
+                <span className="text-muted mistral-route-option-detail">
+                  Structured cards, charts, and template layouts — for testing the new experience.
+                </span>
+              </span>
+            </label>
+          </div>
         </section>
 
         <MunshiMemoryPanel memoryJob={memoryJob} onRunMemoryNow={onRunMemoryNow} hasApiKey={Boolean(savedKey)} />
-
-        <section className="mistral-settings-section mistral-settings-help">
-          <h3>How to get a Mistral API key</h3>
-          <ol>
-            <li>
-              Open the{" "}
-              <a href="https://console.mistral.ai/" target="_blank" rel="noopener noreferrer">
-                Mistral AI Console
-              </a>
-              .
-            </li>
-            <li>Sign up or log in to your Mistral account.</li>
-            <li>
-              Go to <strong>API keys</strong> in the left sidebar (or Workspace → API keys).
-            </li>
-            <li>Click <strong>Create new key</strong>, give it a name, and copy the key.</li>
-            <li>Paste the key above and tap <strong>Save key</strong>.</li>
-          </ol>
-          <p className="text-muted">
-            Mistral bills API usage to your account. Keep the key private — anyone with it can use your quota.
-          </p>
-        </section>
       </div>
     </div>
   );

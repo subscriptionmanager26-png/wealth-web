@@ -16,7 +16,9 @@ export type ChatSession = ChatSessionRecord;
 export type StorageWriteResult = ChatStorageResult;
 
 function hasContent(messages: ChatMessage[]): boolean {
-  return messages.some((m) => m.content.trim().length > 0);
+  return messages.some(
+    (m) => m.content.trim().length > 0 || (m.blocks?.length ?? 0) > 0,
+  );
 }
 
 export function titleFromMessages(messages: ChatMessage[]): string {
@@ -98,7 +100,9 @@ export async function saveChatSession(
   session: ChatSession,
   messages: ChatMessage[],
 ): Promise<{ session: ChatSession; storage: StorageWriteResult }> {
-  const trimmed = messages.filter((m) => m.role === "user" || m.content.trim().length > 0);
+  const trimmed = messages.filter(
+    (m) => m.role === "user" || m.content.trim().length > 0 || (m.blocks?.length ?? 0) > 0,
+  );
   const activityMs = trimmed.length ? lastMessageActivityMs({ ...session, messages: trimmed }) : Date.now();
   const next: ChatSession = {
     ...session,

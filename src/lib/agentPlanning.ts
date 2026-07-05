@@ -1,3 +1,5 @@
+import type { AnswerTemplate } from "./chatBlocks/answerTemplates";
+import { isAnswerTemplate } from "./chatBlocks/answerTemplates";
 import { postChatRequest } from "./chatApiRoute";
 import type { PortfolioSnapshot } from "./portfolioTools";
 import {
@@ -5,6 +7,7 @@ import {
   buildToolApprovalFields,
   refreshDerivedFields,
 } from "./toolInputApproval";
+import { sanitizeToolArguments } from "./portfolioTools/sanitizeToolArgs";
 
 const VALID_TOOLS = new Set([
   "list_available_data",
@@ -42,6 +45,7 @@ const PLANNING_SYSTEM = `You plan which portfolio tools Munshi Ji must call to a
 
 {
   "planSummary": "One plain-language sentence on what you will fetch",
+  "answerTemplate": "dashboard",
   "tools": [{ "name": "tool_name", "arguments": { } }],
   "questions": [{
     "id": "short_id",
@@ -71,8 +75,14 @@ Before finalizing tools[], mentally walk through EVERY parameter each tool needs
 ## Tools
 - List every tool needed upfront in tools[] with your best-guess arguments (defaults for anything you will ask about).
 - Valid tool names: list_available_data, get_portfolio_summary, get_portfolio_performance, list_benchmark_indices, get_benchmark_returns, get_benchmark_comparison, search_market_funds, get_market_fund_details, get_asset_allocation, get_portfolio_fundamentals, get_holdings, get_best_worst_funds, get_fund_details, get_sector_exposure, get_stock_exposure, get_year_wise_returns, get_risk_metrics.
+- Do NOT pass arguments a tool does not accept (e.g. never pass frames to get_portfolio_summary).
 - If nothing needs clarification, return questions: [].
-- Do not invent portfolio numbers — only choose tools and parameter values.`;
+- Do not invent portfolio numbers — only choose tools and parameter values.
+
+## Answer template (mandatory)
+Pick exactly ONE answerTemplate that defines which screen layout Munshi will render:
+dashboard, companyAnalysis, portfolioAnalysis, comparison, recommendation, planning, newsSummary, educational, timeline, calculator, riskAssessment, goalTracker, taxReview, scenarioAnalysis, actionPlan.
+Examples: portfolio worth → dashboard; vs benchmark → comparison; should I sell → recommendation; explain SIP → educational; am I taking risk → riskAssessment.`;
 
 export type ClarifyingOption = {
   id: string;
@@ -101,6 +111,7 @@ export type AgentPlan = {
   planSummary: string;
   tools: PlannedTool[];
   questions: ClarifyingQuestion[];
+  answerTemplate?: AnswerTemplate;
 };
 
 export type ClarificationAnswer = {
@@ -116,7 +127,9 @@ export type ClarificationRequest = {
 };
 
 function parseJsonObject<T>(raw: string): T | null {
-  const trimmed = raw.trim();
+  let trimmed = raw.trim();
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) trimmed = fenced[1].trim();
   try {
     return JSON.parse(trimmed) as T;
   } catch {
@@ -141,7 +154,7 @@ function normalizePlan(raw: unknown): AgentPlan | null {
     .map((t) => {
       if (!isRecord(t) || typeof t.name !== "string") return null;
       if (!VALID_TOOLS.has(t.name)) return null;
-      const args = isRecord(t.arguments) ? t.arguments : {};
+      const args = isRecord(t.arguments) ? sanitizeToolArguments(t.name, t.arguments) : {};
       return { name: t.name, arguments: args };
     })
     .filter((t): t is PlannedTool => t !== null);
@@ -180,8 +193,9 @@ function normalizePlan(raw: unknown): AgentPlan | null {
     .filter((q): q is ClarifyingQuestion => q !== null);
 
   const planSummary = typeof raw.planSummary === "string" ? raw.planSummary.trim() : "Fetching portfolio data";
+  const answerTemplate = isAnswerTemplate(raw.answerTemplate) ? raw.answerTemplate : undefined;
   if (!tools.length) return null;
-  return { planSummary, tools, questions };
+  return { planSummary, tools, questions, answerTemplate };
 }
 
 export function buildSnapshotSummary(snapshot: PortfolioSnapshot): string {
@@ -321,7 +335,8 @@ export function enrichPlannedToolArgs(
   tool: PlannedTool,
   snapshot: PortfolioSnapshot,
 ): Record<string, unknown> {
-  const fields = buildToolApprovalFields(tool.name, tool.arguments, snapshot);
+  const sanitized = sanitizeToolArguments(tool.name, tool.arguments);
+  const fields = buildToolApprovalFields(tool.name, sanitized, snapshot);
   const refreshed = refreshDerivedFields(tool.name, fields, snapshot);
   return approvalFieldsToArgs(tool.name, refreshed);
 }

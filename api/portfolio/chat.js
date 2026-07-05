@@ -1,5 +1,6 @@
 import {
   chatWithMistral,
+  mistralBlocksAnswer,
   mistralChatTurn,
   mistralMemoryExtract,
   streamChatWithMistral,
@@ -66,6 +67,13 @@ export default async function handler(req, res) {
         userContent: typeof payload.userContent === "string" ? payload.userContent : "",
         apiKey,
       });
+      res.writeHead(200, { ...corsHeaders(origin), "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+      return;
+    }
+
+    if (payload.blocksAnswer === true) {
+      const result = await mistralBlocksAnswer({ messages, apiKey, memoryContext });
       res.writeHead(200, { ...corsHeaders(origin), "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
       return;

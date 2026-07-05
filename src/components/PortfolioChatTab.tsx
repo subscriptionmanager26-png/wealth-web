@@ -93,6 +93,9 @@ export function PortfolioChatTab({
     clarificationRequest,
     submitClarification,
     cancelClarification,
+    answerUi,
+    setAnswerUiPreference,
+    generativeUiEnabled,
   } = chat;
 
   const [screenerFunds, setScreenerFunds] = useState<Record<string, ScreenerSchemeMetrics>>({});
@@ -201,11 +204,14 @@ export function PortfolioChatTab({
               {messages.map((m) => {
                 const nonWriteRunning = m.steps?.some((s) => s.status === "running" && s.kind !== "write");
                 const isActiveStream = streamingId === m.id;
+                const storedBlocks = (m.blocks?.length ?? 0) > 0;
+                const hasBlocks = generativeUiEnabled && storedBlocks;
+                const templateLabel = m.answerTemplate?.replace(/([A-Z])/g, " $1").trim();
                 const showAnswer =
                   m.role === "assistant" &&
-                  m.content.trim().length > 0 &&
+                  (m.content.trim().length > 0 || storedBlocks) &&
                   (!nonWriteRunning || !isActiveStream);
-                const isStreaming = isActiveStream && m.content.length > 0 && !nonWriteRunning;
+                const isStreaming = isActiveStream && !storedBlocks && m.content.length > 0 && !nonWriteRunning;
 
                 if (m.role === "user") {
                   return (
@@ -233,18 +239,27 @@ export function PortfolioChatTab({
                           <ChatAgentSteps
                             steps={m.steps}
                             active={isActiveStream || busy}
-                            hasAnswer={m.content.trim().length > 0}
+                            hasAnswer={m.content.trim().length > 0 || storedBlocks}
                           />
                         </div>
                       ) : null}
                       {(showAnswer || isStreaming) && (
                         <div className="portfolio-chat-reply">
+                          {templateLabel && hasBlocks ? (
+                            <span className="gen-template-badge">{templateLabel}</span>
+                          ) : null}
                           {showAnswer || isStreaming ? (
-                            <ChatMessageContent content={m.content} streaming={isStreaming} />
+                            <ChatMessageContent
+                              content={m.content}
+                              blocks={m.blocks}
+                              toolData={m.toolData}
+                              streaming={isStreaming}
+                              generativeUi={generativeUiEnabled}
+                            />
                           ) : null}
                         </div>
                       )}
-                      {m.content.trim() && !isActiveStream ? (
+                      {(m.content.trim() || storedBlocks) && !isActiveStream ? (
                         <ChatMessageActions
                           role="assistant"
                           content={m.content}
@@ -287,6 +302,8 @@ export function PortfolioChatTab({
         onClearKey={clearApiKey}
         memoryJob={memoryJob}
         onRunMemoryNow={runMemoryNow}
+        answerUi={answerUi}
+        onAnswerUiChange={setAnswerUiPreference}
       />
 
       <ClarificationModal

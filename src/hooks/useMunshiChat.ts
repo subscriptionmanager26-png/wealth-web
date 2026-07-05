@@ -32,6 +32,15 @@ import { completeRunningSteps } from "../lib/agentSteps";
 import type { PortfolioSnapshot } from "../lib/portfolioTools";
 import type { ChatMessage } from "../lib/portfolioChat";
 import type { ClarificationAnswers, ClarificationRequest } from "../lib/agentPlanning";
+import { mergeToolData, type ToolDataStore } from "../lib/portfolioTools/toolData";
+import { hydrateToolDataFromSnapshot } from "../lib/portfolioTools/hydrateToolData";
+import {
+  DEFAULT_MUNSHI_ANSWER_UI,
+  isGenerativeUiEnabled,
+  loadMunshiAnswerUi,
+  saveMunshiAnswerUi,
+  type MunshiAnswerUi,
+} from "../lib/munshiUiSettings";
 
 function newId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -70,8 +79,10 @@ export function useMunshiChat() {
   const apiKeyRef = useRef(apiKey);
   const autoExtractScheduledRef = useRef(false);
   const approvalResolverRef = useRef<((args: ClarificationAnswers | null) => void) | null>(null);
+  const toolDataRef = useRef<ToolDataStore>({});
 
   const [clarificationRequest, setClarificationRequest] = useState<ClarificationRequest | null>(null);
+  const [answerUi, setAnswerUi] = useState<MunshiAnswerUi>(() => loadMunshiAnswerUi());
 
   sessionRef.current = session;
   messagesRef.current = messages;
@@ -236,6 +247,17 @@ export function useMunshiChat() {
     setClarificationRequest(null);
   }, []);
 
+  const setAnswerUiPreference = useCallback((ui: MunshiAnswerUi) => {
+    const next = ui === "generative" ? "generative" : DEFAULT_MUNSHI_ANSWER_UI;
+    if (!saveMunshiAnswerUi(next)) {
+      setStorageError("Could not save Munshi display preference on this device.");
+      return false;
+    }
+    setAnswerUi(next);
+    setStorageError(null);
+    return true;
+  }, []);
+
   const runQuestion = useCallback(
     async (
       question: string,
@@ -268,6 +290,7 @@ export function useMunshiChat() {
 
       const controller = new AbortController();
       abortRef.current = controller;
+      toolDataRef.current = {};
 
       let memoryContext = "";
       try {
@@ -279,6 +302,8 @@ export function useMunshiChat() {
         /* memory retrieval is best-effort */
       }
 
+      const useGenerativeUi = isGenerativeUiEnabled(answerUi);
+
       try {
         await runPortfolioChatAgent(
           { question: q, history, apiKey, snapshot, signal: controller.signal, memoryContext },
@@ -286,7 +311,11 @@ export function useMunshiChat() {
             onDelta: (delta) => {
               flushSync(() => {
                 setMessages((prev) => {
-                  const next = prev.map((m) => (m.id === assistantId ? { ...m, content: m.content + delta } : m));
+                  const next = prev.map((m) => {
+                    if (m.id !== assistantId) return m;
+                    if (useGenerativeUi && (m.blocks?.length ?? 0) > 0) return m;
+                    return { ...m, content: m.content + delta };
+                  });
                   messagesRef.current = next;
                   return next;
                 });
@@ -303,6 +332,32 @@ export function useMunshiChat() {
                 });
                 requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
               });
+            },
+            onBlocks: useGenerativeUi
+              ? (blocks, fallbackText, answerTemplate) => {
+                  const fullToolData = hydrateToolDataFromSnapshot(snapshot, toolDataRef.current);
+                  toolDataRef.current = fullToolData;
+                  flushSync(() => {
+                    setMessages((prev) => {
+                      const next = prev.map((m) =>
+                        m.id === assistantId
+                          ? {
+                              ...m,
+                              blocks,
+                              content: fallbackText,
+                              toolData: { ...fullToolData },
+                              answerTemplate,
+                            }
+                          : m,
+                      );
+                      messagesRef.current = next;
+                      return next;
+                    });
+                  });
+                }
+              : undefined,
+            onToolData: (payload) => {
+              toolDataRef.current = mergeToolData(toolDataRef.current, payload);
             },
             onClarification: requestClarification,
           },
@@ -325,6 +380,20 @@ export function useMunshiChat() {
       } finally {
         abortRef.current = null;
         approvalResolverRef.current = null;
+        flushSync(() => {
+          setMessages((prev) => {
+            const hasToolData = Object.keys(toolDataRef.current).length > 0;
+            if (!hasToolData) return prev;
+            const next = prev.map((m) =>
+              m.id === assistantId && !m.toolData
+                ? { ...m, toolData: { ...toolDataRef.current } }
+                : m,
+            );
+            messagesRef.current = next;
+            return next;
+          });
+        });
+        toolDataRef.current = {};
         setClarificationRequest(null);
         setStreamingId(null);
         setBusy(false);
@@ -332,7 +401,7 @@ export function useMunshiChat() {
         void refreshMemoryStatus();
       }
     },
-    [apiKey, busy, persistToStorage, requestClarification],
+    [answerUi, apiKey, busy, persistToStorage, requestClarification],
   );
 
   const send = useCallback(
@@ -412,6 +481,9 @@ export function useMunshiChat() {
     clarificationRequest,
     submitClarification,
     cancelClarification,
+    answerUi,
+    setAnswerUiPreference,
+    generativeUiEnabled: isGenerativeUiEnabled(answerUi),
   };
 }
 

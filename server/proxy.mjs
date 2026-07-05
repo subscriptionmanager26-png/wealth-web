@@ -10,6 +10,7 @@ import { URL } from "node:url";
 import { corsHeaders, fetchAmfiNavHistory, fetchAmfiPortalNav, fetchNiftyTri } from "./upstream.mjs";
 import {
   chatWithMistral,
+  mistralBlocksAnswer,
   mistralChatTurn,
   mistralMemoryExtract,
   streamChatWithMistral,
@@ -136,6 +137,17 @@ const server = createServer(async (req, res) => {
           systemPrompt: typeof payload.systemPrompt === "string" ? payload.systemPrompt : "",
           userContent: typeof payload.userContent === "string" ? payload.userContent : "",
           apiKey,
+        });
+        res.writeHead(200, { ...corsHeaders(origin, ALLOW_ORIGIN), "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      if (payload.blocksAnswer === true) {
+        const result = await mistralBlocksAnswer({
+          messages: chatInput.messages,
+          apiKey,
+          memoryContext,
         });
         res.writeHead(200, { ...corsHeaders(origin, ALLOW_ORIGIN), "Content-Type": "application/json" });
         res.end(JSON.stringify(result));
