@@ -5,7 +5,7 @@ import {
   listUpvalyFundReturns,
 } from "@mobile/utils/upvalyMfApi";
 import type { FundHolding } from "../buildHoldings";
-import { computePeriodReturn, navPointsFromSeries, type TimeFrame } from "../performanceUtils";
+import { computeDateRangeReturn, computePeriodReturn, navPointsFromSeries, type TimeFrame } from "../performanceUtils";
 import { fmt, pct, viewLabel } from "./format";
 import {
   formatPortfolioPeriodReturns,
@@ -17,6 +17,19 @@ import {
 import type { PortfolioSnapshot, PortfolioToolName } from "./types";
 
 const COMPARISON_FRAMES: TimeFrame[] = ["MTD", "1M", "3M", "6M", "1Y", "3Y", "5Y"];
+
+function parseIsoDate(value: unknown): Date | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const m = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0, 0);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function returnModeArg(value: unknown): "auto" | "absolute" | "cagr" {
+  if (value === "absolute" || value === "cagr") return value;
+  return "auto";
+}
 
 function totalWeight(holdings: FundHolding[]): number {
   return holdings.reduce((a, h) => a + h.amount, 0) || 1;
@@ -78,31 +91,56 @@ export function getPortfolioSummary(snapshot: PortfolioSnapshot): string {
 
 export function getPortfolioPerformance(
   snapshot: PortfolioSnapshot,
-  args: { include_calendar_years?: boolean; frames?: string[] },
+  args: {
+    include_calendar_years?: boolean;
+    frames?: string[];
+    start_date?: string;
+    end_date?: string;
+    return_mode?: string;
+  },
 ): string {
-  return formatPortfolioPeriodReturns(snapshot, {
-    frames: args.frames,
-    include_calendar_years: Boolean(args.include_calendar_years),
-  });
+  return formatPortfolioPeriodReturns(snapshot, args);
 }
 
 export function getBenchmarkComparison(
   snapshot: PortfolioSnapshot,
-  args: { benchmark_id?: string; frames?: string[] },
+  args: {
+    benchmark_id?: string;
+    frames?: string[];
+    start_date?: string;
+    end_date?: string;
+    return_mode?: string;
+  },
 ): string {
   const benchmarkId = (args.benchmark_id?.trim() || "nifty500") as BenchmarkId;
   const label = BENCHMARK_OPTIONS.find((b) => b.id === benchmarkId)?.label ?? benchmarkId;
   const portfolioNav = navPointsFromSeries(snapshot.perf?.points?.map((p) => ({ date: p.date, nav100: p.nav100 })));
   const benchNav = navPointsFromSeries(snapshot.benchmarkMonthEnds?.[benchmarkId]);
+  const returnMode = returnModeArg(args.return_mode);
+  const start = parseIsoDate(args.start_date);
+  const end = parseIsoDate(args.end_date);
 
   if (portfolioNav.length < 2 && benchNav.length < 2) {
     return `Benchmark comparison vs ${label}: insufficient NAV/benchmark data.`;
   }
 
-  const frameSet = new Set(
-    (args.frames?.length ? args.frames : COMPARISON_FRAMES) as TimeFrame[],
-  );
   const lines = [`=== BENCHMARK COMPARISON (vs ${label} TRI) ===`];
+
+  if (start && end) {
+    const port = computeDateRangeReturn(portfolioNav, start, end, returnMode);
+    const bench = computeDateRangeReturn(benchNav, start, end, returnMode);
+    const portText = port.returnPct != null ? pct(port.returnPct) : "NA";
+    const benchText = bench.returnPct != null ? pct(bench.returnPct) : "NA";
+    let alpha = "NA";
+    if (port.returnPct != null && bench.returnPct != null) {
+      alpha = pct(port.returnPct - bench.returnPct);
+    }
+    lines.push(`Custom range: Portfolio ${portText} | Benchmark ${benchText} | Alpha ${alpha}`);
+  }
+
+  const frameSet = new Set(
+    (args.frames?.length ? args.frames : start && end ? [] : COMPARISON_FRAMES) as TimeFrame[],
+  );
   for (const frame of COMPARISON_FRAMES) {
     if (!frameSet.has(frame)) continue;
     const port = computePeriodReturn(portfolioNav, frame);

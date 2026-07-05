@@ -131,6 +131,95 @@ export function computePeriodReturn(points: NavPoint[], frame: TimeFrame) {
   return computeWindowReturn(resolvePerformanceWindow(points, frame), frame);
 }
 
+function yearsBetweenDates(first: Date, last: Date): number {
+  return (last.getTime() - first.getTime()) / (365.2425 * 86400000);
+}
+
+export function computeDateRangeReturn(
+  points: NavPoint[],
+  startDate: Date,
+  endDate: Date,
+  returnMode: "auto" | "absolute" | "cagr" = "auto",
+): ReturnType<typeof computeWindowReturn> {
+  const sorted = sortNavPoints(points);
+  if (sorted.length < 2) {
+    return {
+      available: false,
+      kind: "absolute",
+      returnPct: null,
+      indexEnd: null,
+      startDate: null,
+      endDate: null,
+    };
+  }
+
+  const startMs = startDate.getTime();
+  const endMs = endDate.getTime();
+  if (endMs < startMs) {
+    return {
+      available: false,
+      kind: "absolute",
+      returnPct: null,
+      indexEnd: null,
+      startDate: null,
+      endDate: null,
+    };
+  }
+
+  let startPoint: NavPoint | null = null;
+  let endPoint: NavPoint | null = null;
+  for (const p of sorted) {
+    if (p.date.getTime() <= startMs) startPoint = p;
+    if (p.date.getTime() <= endMs) endPoint = p;
+  }
+  if (!startPoint || !endPoint || startPoint.date.getTime() >= endPoint.date.getTime()) {
+    return {
+      available: false,
+      kind: "absolute",
+      returnPct: null,
+      indexEnd: null,
+      startDate: null,
+      endDate: null,
+    };
+  }
+
+  const years = yearsBetweenDates(startPoint.date, endPoint.date);
+  const useCagr = returnMode === "cagr" || (returnMode === "auto" && years >= 1);
+  const indexEnd = (endPoint.nav100 / startPoint.nav100) * 100;
+
+  if (!useCagr) {
+    return {
+      available: true,
+      kind: "absolute",
+      returnPct: indexEnd - 100,
+      indexEnd,
+      startDate: startPoint.date,
+      endDate: endPoint.date,
+    };
+  }
+
+  if (years <= 0) {
+    return {
+      available: false,
+      kind: "cagr",
+      returnPct: null,
+      indexEnd: null,
+      startDate: null,
+      endDate: null,
+    };
+  }
+
+  const cagr = (Math.pow(endPoint.nav100 / startPoint.nav100, 1 / years) - 1) * 100;
+  return {
+    available: true,
+    kind: "cagr",
+    returnPct: cagr,
+    indexEnd,
+    startDate: startPoint.date,
+    endDate: endPoint.date,
+  };
+}
+
 export function formatHeroReturn(result: ReturnType<typeof computePeriodReturn>): string {
   if (!result.available || result.returnPct == null) return "NA";
   const sign = result.returnPct >= 0 ? "+" : "";

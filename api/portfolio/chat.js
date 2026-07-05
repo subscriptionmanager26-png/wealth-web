@@ -72,7 +72,8 @@ export default async function handler(req, res) {
     }
 
     if (useTools && payload.stream !== true) {
-      const result = await mistralChatTurn({ messages, apiKey, tools: true, memoryContext });
+      const toolChoice = payload.toolChoice === "required" ? "required" : "auto";
+      const result = await mistralChatTurn({ messages, apiKey, tools: true, toolChoice, memoryContext });
       res.writeHead(200, { ...corsHeaders(origin), "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
       return;
@@ -90,6 +91,7 @@ export default async function handler(req, res) {
           messages,
           apiKey,
           memoryContext,
+          answerFromToolsOnly: payload.answerFromToolsOnly === true,
           onChunk: (text) => {
             res.write(`data: ${JSON.stringify({ text })}\n\n`);
           },

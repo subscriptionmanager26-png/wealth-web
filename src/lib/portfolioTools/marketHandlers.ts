@@ -6,6 +6,7 @@ import {
 } from "@mobile/utils/upvalyMfApi";
 import type { ScreenerSchemeMetrics } from "../screenerSnapshot";
 import {
+  computeDateRangeReturn,
   computePeriodReturn,
   formatPerfDateRange,
   navPointsFromSeries,
@@ -16,6 +17,33 @@ import { pct } from "./format";
 import type { PortfolioSnapshot } from "./types";
 
 const COMPARISON_FRAMES: TimeFrame[] = ["MTD", "1M", "3M", "6M", "1Y", "3Y", "5Y"];
+
+function parseIsoDate(value: unknown): Date | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const m = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0, 0);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function returnModeArg(value: unknown): "auto" | "absolute" | "cagr" {
+  if (value === "absolute" || value === "cagr") return value;
+  return "auto";
+}
+
+function formatCustomBenchmarkLine(
+  label: string,
+  benchNav: ReturnType<typeof navPointsFromSeries>,
+  start: Date,
+  end: Date,
+  returnMode: "auto" | "absolute" | "cagr",
+): string | null {
+  const result = computeDateRangeReturn(benchNav, start, end, returnMode);
+  if (!result.available || result.returnPct == null) return null;
+  const kind = result.kind === "cagr" ? "ann." : "abs.";
+  const range = formatPerfDateRange(result.startDate, result.endDate);
+  return `${label}: ${pct(result.returnPct)} (${kind}${range ? ` · ${range}` : ""})`;
+}
 
 export function listBenchmarkIndices(snapshot: PortfolioSnapshot): string {
   const loaded = new Set(
@@ -37,7 +65,13 @@ export function listBenchmarkIndices(snapshot: PortfolioSnapshot): string {
 
 export function getBenchmarkReturns(
   snapshot: PortfolioSnapshot,
-  args: { benchmark_id?: string; frames?: string[] },
+  args: {
+    benchmark_id?: string;
+    frames?: string[];
+    start_date?: string;
+    end_date?: string;
+    return_mode?: string;
+  },
 ): string {
   const benchmarkId = (args.benchmark_id?.trim() || "nifty500") as BenchmarkId;
   const label = BENCHMARK_OPTIONS.find((b) => b.id === benchmarkId)?.label ?? benchmarkId;
@@ -47,10 +81,19 @@ export function getBenchmarkReturns(
     return `Benchmark ${label} (${benchmarkId}): month-end TRI series not loaded. Call list_benchmark_indices for available indices.`;
   }
 
-  const frameSet = new Set(
-    (args.frames?.length ? args.frames : COMPARISON_FRAMES) as TimeFrame[],
-  );
+  const start = parseIsoDate(args.start_date);
+  const end = parseIsoDate(args.end_date);
+  const returnMode = returnModeArg(args.return_mode);
   const lines = [`=== BENCHMARK RETURNS: ${label} (${benchmarkId}) ===`];
+
+  if (start && end) {
+    const custom = formatCustomBenchmarkLine("Custom range", benchNav, start, end, returnMode);
+    lines.push(custom ?? "Custom range: NA (insufficient history for selected dates)");
+  }
+
+  const frameSet = new Set(
+    (args.frames?.length ? args.frames : start && end ? [] : COMPARISON_FRAMES) as TimeFrame[],
+  );
   for (const frame of COMPARISON_FRAMES) {
     if (!frameSet.has(frame)) continue;
     const result = computePeriodReturn(benchNav, frame);
@@ -218,15 +261,29 @@ export function getMarketFundDetails(
 
 export function formatPortfolioPeriodReturns(
   snapshot: PortfolioSnapshot,
-  args: { frames?: string[]; include_calendar_years?: boolean },
+  args: {
+    frames?: string[];
+    include_calendar_years?: boolean;
+    start_date?: string;
+    end_date?: string;
+    return_mode?: string;
+  },
 ): string {
   const perf = snapshot.perf;
   if (!perf?.points?.length) return "Portfolio NAV performance: not loaded yet.";
 
   const nav = navPointsFromSeries(perf.points.map((p) => ({ date: p.date, nav100: p.nav100 })));
+  const start = parseIsoDate(args.start_date);
+  const end = parseIsoDate(args.end_date);
+  const returnMode = returnModeArg(args.return_mode);
   const requested = (args.frames?.length ? args.frames : ["MTD", "YTD", "1M", "3M", "6M", "1Y", "3Y", "5Y"]) as string[];
 
   const lines = ["=== PORTFOLIO PERFORMANCE (NAV-based, month-end) ==="];
+
+  if (start && end) {
+    const custom = formatCustomBenchmarkLine("Custom range", nav, start, end, returnMode);
+    lines.push(custom ?? "Custom range: NA (insufficient history for selected dates)");
+  }
 
   for (const frame of requested) {
     if (frame === "YTD") {

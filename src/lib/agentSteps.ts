@@ -38,7 +38,7 @@ const TOOL_LABELS: Record<string, string> = {
   get_risk_metrics: "get_risk_metrics",
 };
 
-const TOOL_DESCRIPTIONS: Record<string, string> = {
+export const TOOL_DESCRIPTIONS: Record<string, string> = {
   list_available_data: "Check what portfolio data is loaded",
   get_portfolio_summary: "Read portfolio value, gain, and XIRR",
   get_portfolio_performance: "Read NAV-based returns",

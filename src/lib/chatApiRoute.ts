@@ -23,6 +23,8 @@ type ChatProxyBody = {
   memoryExtract?: boolean;
   systemPrompt?: string;
   userContent?: string;
+  toolChoice?: "auto" | "required";
+  answerFromToolsOnly?: boolean;
 };
 
 export async function postChatRequest(

@@ -10,17 +10,35 @@ const DEFAULT_MODEL = process.env.MISTRAL_MODEL ?? "mistral-large-latest";
 
 const BASE_SYSTEM_PROMPT = `You are Munshi Ji, a portfolio assistant for Indian mutual fund investors.
 
-You have tools to fetch portfolio data on demand. Call only the tools you need — see the tool catalog below.
+## Data discipline (mandatory)
+- **All factual data must come from tool results in this conversation.** You have no direct access to the user's portfolio, NAVs, holdings, or live market data.
+- **Never state portfolio values, returns, fund names, holdings, benchmark figures, TER, AUM, sector weights, or any numeric metric from memory, training data, or guesswork.**
+- **You must call tools before answering any question that needs portfolio, market, or benchmark facts.** Do not answer with data until tool messages are present in the conversation.
+- If tool results are missing or say "not available", say so plainly — do not fill gaps from memory.
+- User memory (if provided) is for preferences and context only — never for portfolio numbers or holdings.
+
+## Style
+- **Be short, crisp, and to the point.** Lead with the direct answer in the first sentence. No preamble, no recap of the question, no filler ("Great question!", "Let me break this down").
+- **Default length:** 2–5 sentences for simple questions; use bullets or a small table only when comparing multiple items. Skip sections the user did not ask for.
+- **Do not repeat** tool output verbatim — extract only what answers the question.
 - Always respond in English unless the user explicitly asks for another language.
 - Answer the user's question directly. Do not open with an unsolicited benchmark summary.
 - The data deliberately excludes personal identifiers (names, PAN, address, folio numbers, email, phone). Never ask for or infer them.
 - Use INR (₹) for amounts and Indian number formatting where helpful.
-- If tool results say data is missing or not loaded, say so — never invent holdings, schemes, NAV figures, or metrics.
 - Do not recommend buys or sells unless explicitly asked.
 - This is informational only, not investment advice.
-- Use Markdown for structured answers (headings, bullet lists, tables when helpful).
-- Use LaTeX for formulas when showing calculations, e.g. inline $XIRR$ or display $$\\text{Return} = \\frac{V_1 - V_0}{V_0}$$.
+- Use Markdown sparingly (brief bullets or one small table when it aids clarity). Avoid long headings and nested structure unless the user asked for a detailed breakdown.
+- Use LaTeX only when a formula is essential to the answer.
 - Distinguish between portfolio-level metrics (NAV/XIRR) and individual fund metrics (scheme returns).`;
+
+const TOOLS_ONLY_ANSWER_SUFFIX = `
+
+## Final answer (mandatory)
+You are writing the final user-facing answer. Tool result messages in this conversation are your **only** authoritative source of factual data.
+- Cite only numbers, names, and metrics that appear in tool outputs above.
+- Do not add fund facts, market data, or portfolio figures from memory or general knowledge.
+- If the tools did not return something the user asked for, say it is not available — do not invent it.
+- **Keep it short:** answer in the fewest words that fully address the question. Lead with the conclusion; support with 1–3 key numbers only. No lengthy explanations, disclaimers beyond one line, or data dumps.`;
 
 let cachedToolCatalog = null;
 
@@ -34,11 +52,12 @@ function loadToolCatalog() {
   return cachedToolCatalog;
 }
 
-function buildSystemPrompt(memoryContext) {
+function buildSystemPrompt(memoryContext, { answerFromToolsOnly = false } = {}) {
   const memory = memoryContext?.trim()
-    ? `\n\n---\n\n## User memory\n${memoryContext.trim()}\n\nPortfolio tool results always override memory if they conflict.`
+    ? `\n\n---\n\n## User memory\n${memoryContext.trim()}\n\nMemory is for preferences and conversation context only — never use it for portfolio numbers, holdings, or returns. Tool results always override memory.`
     : "";
-  return `${BASE_SYSTEM_PROMPT}${memory}\n\n---\n\n${loadToolCatalog()}`;
+  const answerSuffix = answerFromToolsOnly ? TOOLS_ONLY_ANSWER_SUFFIX : "";
+  return `${BASE_SYSTEM_PROMPT}${memory}${answerSuffix}\n\n---\n\n${loadToolCatalog()}`;
 }
 
 function resolveApiKey(apiKeyInput) {
@@ -140,7 +159,13 @@ export async function mistralMemoryExtract({ systemPrompt, userContent, apiKey: 
 }
 
 /** Agent turn with optional tools (non-streaming). */
-export async function mistralChatTurn({ messages, apiKey: apiKeyInput, tools = false, memoryContext }) {
+export async function mistralChatTurn({
+  messages,
+  apiKey: apiKeyInput,
+  tools = false,
+  toolChoice = "auto",
+  memoryContext,
+}) {
   const apiKey = resolveApiKey(apiKeyInput);
   const mistralMessages = buildMistralMessages({ messages, useTools: tools, memoryContext });
 
@@ -151,7 +176,7 @@ export async function mistralChatTurn({ messages, apiKey: apiKeyInput, tools = f
   };
   if (tools) {
     body.tools = MUNSHI_TOOL_SCHEMAS;
-    body.tool_choice = "auto";
+    body.tool_choice = toolChoice === "required" ? "required" : "auto";
   }
 
   const t0 = Date.now();
@@ -193,10 +218,16 @@ function parseSseLines(buffer, onDataLine) {
 }
 
 /** Stream final answer (no tools). */
-export async function streamMistralChat({ messages, apiKey: apiKeyInput, onChunk, memoryContext }) {
+export async function streamMistralChat({
+  messages,
+  apiKey: apiKeyInput,
+  onChunk,
+  memoryContext,
+  answerFromToolsOnly = false,
+}) {
   const apiKey = resolveApiKey(apiKeyInput);
   const mistralMessages = [
-    { role: "system", content: buildSystemPrompt(memoryContext) },
+    { role: "system", content: buildSystemPrompt(memoryContext, { answerFromToolsOnly }) },
     ...normalizeAgentMessages(messages),
   ];
 

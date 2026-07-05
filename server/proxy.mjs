@@ -143,7 +143,8 @@ const server = createServer(async (req, res) => {
       }
 
       if (useTools && payload.stream !== true) {
-        const result = await mistralChatTurn({ ...chatInput, tools: true, memoryContext });
+        const toolChoice = payload.toolChoice === "required" ? "required" : "auto";
+        const result = await mistralChatTurn({ ...chatInput, tools: true, toolChoice, memoryContext });
         res.writeHead(200, { ...corsHeaders(origin, ALLOW_ORIGIN), "Content-Type": "application/json" });
         res.end(JSON.stringify(result));
         return;
@@ -161,6 +162,7 @@ const server = createServer(async (req, res) => {
             messages: chatInput.messages,
             apiKey,
             memoryContext,
+            answerFromToolsOnly: payload.answerFromToolsOnly === true,
             onChunk: (text) => {
               res.write(`data: ${JSON.stringify({ text })}\n\n`);
             },

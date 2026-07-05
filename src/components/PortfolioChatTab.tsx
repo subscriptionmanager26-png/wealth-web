@@ -16,6 +16,7 @@ import { ChatHistoryDrawer } from "./ChatHistoryDrawer";
 import { ChatMessageActions } from "./ChatMessageActions";
 import { ChatMessageContent } from "./ChatMessageContent";
 import { MistralSettingsModal } from "./MistralSettingsModal";
+import { ClarificationModal } from "./ClarificationModal";
 
 type Props = {
   chat: MunshiChatController;
@@ -89,6 +90,9 @@ export function PortfolioChatTab({
     startEdit,
     memoryJob,
     runMemoryNow,
+    clarificationRequest,
+    submitClarification,
+    cancelClarification,
   } = chat;
 
   const [screenerFunds, setScreenerFunds] = useState<Record<string, ScreenerSchemeMetrics>>({});
@@ -283,6 +287,13 @@ export function PortfolioChatTab({
         onClearKey={clearApiKey}
         memoryJob={memoryJob}
         onRunMemoryNow={runMemoryNow}
+      />
+
+      <ClarificationModal
+        open={Boolean(clarificationRequest)}
+        request={clarificationRequest}
+        onSubmit={submitClarification}
+        onCancel={cancelClarification}
       />
     </>
   );

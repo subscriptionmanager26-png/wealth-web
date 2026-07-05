@@ -80,59 +80,6 @@ export function isBoilerLine(line: string): boolean {
   return false;
 }
 
-const DEVANAGARI_RE = /[\u0900-\u097F]/;
-
-const REPLACEMENT_CHAR_RE = /\uFFFD/;
-
-/** Strip Hindi / Devanagari and bilingual column noise; keep Latin security names. */
-export function englishOnlyText(raw: string): string {
-  return raw
-    .replace(DEVANAGARI_RE, " ")
-    .replace(REPLACEMENT_CHAR_RE, " ")
-    .replace(/#/g, " ")
-    .replace(/₹|\(`\)|\(\`\)/g, " ")
-    .replace(/\b(Bal|Value|Face|Free|Setup|Pledge|Frozen|Market|Current|ISIN|Security|Demat|Remat|Lockin|Price)\b/gi, " ")
-    .replace(/Price\s*\//gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-export function isEnglishSecurityLine(line: string): boolean {
-  const noHindi = line.replace(DEVANAGARI_RE, "").trim();
-  if (noHindi.length < 2) return false;
-  if (REPLACEMENT_CHAR_RE.test(line)) return false;
-  if (ISIN_RE.test(noHindi) && moneyTokens(noHindi).length >= 3) return false;
-  if (/^\d{2}-\d{2}-\d{4}\s+\S+\s+[\d,]+\.\d+/.test(noHindi)) return false;
-  if (/--/.test(noHindi) && moneyTokens(noHindi).length >= 1) return false;
-  if (/^(Page|Central Depository|CONSOLIDATED|Account Details|Investments|Price|Value|Market|Current|ISIN|Security|Demat|Remat|Lockin|Bal|Free|Setup|Pledge|Frozen|₹)/i.test(noHindi)) {
-    return false;
-  }
-  if (/Price\s*\//i.test(noHindi) && noHindi.length < 48) return false;
-  const latin = noHindi.replace(/[^A-Za-z0-9.,()\-/&]/g, "");
-  return latin.length >= Math.min(4, noHindi.length * 0.4);
-}
-
-export function extractCdslInvestorName(lines: string[]): string | null {
-  for (const line of lines.slice(0, 80)) {
-    const m = line.match(/^([A-Z][A-Z\s.()]{4,48})(?:\s+Mutual Fund Folios|\s*$)/);
-    if (m) return englishOnlyText(m[1]!);
-  }
-  const single = lines.join("\n").match(/In the single name of\s+([A-Za-z .()]+)\s*\(\s*PAN/i);
-  if (single) return englishOnlyText(single[1]!);
-  for (const line of lines) {
-    if (/Account Details/i.test(line)) {
-      const idx = lines.indexOf(line);
-      for (let j = idx + 1; j < Math.min(lines.length, idx + 4); j += 1) {
-        const cand = lines[j]!;
-        if (/^[A-Z][A-Z\s.()]{4,40}$/.test(cand.replace(DEVANAGARI_RE, "").trim())) {
-          return englishOnlyText(cand);
-        }
-      }
-    }
-  }
-  return null;
-}
-
 /**
  * Extract monetary / quantity tokens from a line.
  * Strips face-value noise (RS 5/-, RE.1/-) and folio fragments (123/66) first.

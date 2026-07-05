@@ -31,6 +31,7 @@ import { runPortfolioChatAgent, ChatAbortError } from "../lib/portfolioChatAgent
 import { completeRunningSteps } from "../lib/agentSteps";
 import type { PortfolioSnapshot } from "../lib/portfolioTools";
 import type { ChatMessage } from "../lib/portfolioChat";
+import type { ClarificationAnswers, ClarificationRequest } from "../lib/agentPlanning";
 
 function newId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -68,6 +69,9 @@ export function useMunshiChat() {
   const abortRef = useRef<AbortController | null>(null);
   const apiKeyRef = useRef(apiKey);
   const autoExtractScheduledRef = useRef(false);
+  const approvalResolverRef = useRef<((args: ClarificationAnswers | null) => void) | null>(null);
+
+  const [clarificationRequest, setClarificationRequest] = useState<ClarificationRequest | null>(null);
 
   sessionRef.current = session;
   messagesRef.current = messages;
@@ -210,6 +214,28 @@ export function useMunshiChat() {
     }
   }, [refreshSessions]);
 
+  const requestClarification = useCallback((request: ClarificationRequest) => {
+    return new Promise<ClarificationAnswers | null>((resolve) => {
+      approvalResolverRef.current = resolve;
+      setClarificationRequest(request);
+    });
+  }, []);
+
+  const submitClarification = useCallback((answers: ClarificationAnswers) => {
+    if (!clarificationRequest || !approvalResolverRef.current) return;
+    approvalResolverRef.current(answers);
+    approvalResolverRef.current = null;
+    setClarificationRequest(null);
+  }, [clarificationRequest]);
+
+  const cancelClarification = useCallback(() => {
+    if (approvalResolverRef.current) {
+      approvalResolverRef.current(null);
+      approvalResolverRef.current = null;
+    }
+    setClarificationRequest(null);
+  }, []);
+
   const runQuestion = useCallback(
     async (
       question: string,
@@ -278,6 +304,7 @@ export function useMunshiChat() {
                 requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
               });
             },
+            onClarification: requestClarification,
           },
         );
       } catch (e) {
@@ -297,13 +324,15 @@ export function useMunshiChat() {
         }
       } finally {
         abortRef.current = null;
+        approvalResolverRef.current = null;
+        setClarificationRequest(null);
         setStreamingId(null);
         setBusy(false);
         await persistToStorage(messagesRef.current);
         void refreshMemoryStatus();
       }
     },
-    [apiKey, busy, persistToStorage],
+    [apiKey, busy, persistToStorage, requestClarification],
   );
 
   const send = useCallback(
@@ -380,6 +409,9 @@ export function useMunshiChat() {
     regenerate,
     startEdit,
     persistToStorage,
+    clarificationRequest,
+    submitClarification,
+    cancelClarification,
   };
 }
 
