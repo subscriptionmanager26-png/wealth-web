@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-07-06T08:39:18.063Z",
-  "fetchedAt": "2026-07-06T08:39:18.063Z",
-  "lastAttemptAt": "2026-07-06T08:39:18.063Z",
+  "generatedAt": "2026-07-07T07:50:09.186Z",
+  "fetchedAt": "2026-07-07T07:50:09.186Z",
+  "lastAttemptAt": "2026-07-07T07:50:09.186Z",
   "lastAttemptOk": true,
   "source": "https://www.niftyindices.com/BackPage/getTotalReturnIndexString",
   "mode": "recent-merge",
@@ -9,11 +9,7 @@
   "requestGapMs": 2500,
   "indexCount": 21,
   "fetched": 18,
-  "refreshed": 18,
+  "refreshed": 21,
   "reused": 0,
-  "failed": [
-    "nifty_microcap_250",
-    "nifty_midcap_select",
-    "nifty_total_market"
-  ]
+  "failed": []
 }
