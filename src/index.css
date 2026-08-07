@@ -1,21 +1,23 @@
 :root {
-  --orange: #f97316;
-  --accent: #ff7a00;
-  --orange-dark: #ea580c;
-  --bg: #f8fafc;
-  --surface: #ffffff;
-  --border: #e5e7eb;
-  --border-light: #f3f4f6;
-  --text: #0f172a;
-  --text-secondary: #64748b;
-  --text-muted: #94a3b8;
-  --positive: #059669;
+  /* PocketEdge design language (match www.pocketedge.in) */
+  --orange: #ff6719;
+  --accent: #ff6719;
+  --orange-dark: #e5560e;
+  --bg: #ffffff;
+  --surface: #f7f6f4;
+  --border: #ececec;
+  --border-light: #f7f6f4;
+  --text: #171717;
+  --text-secondary: #6b7280;
+  --text-muted: #9ca3af;
+  --positive: #16a34a;
   --negative: #dc2626;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-  font-family: Inter, system-ui, -apple-system, sans-serif;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.09), 0 1px 3px rgba(0, 0, 0, 0.05);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
   line-height: 1.5;
   color: var(--text);
   background: var(--bg);
+  color-scheme: light;
 }
 
 * {
@@ -39,23 +41,55 @@ input {
 }
 
 .app-header {
-  background: var(--orange);
-  color: white;
+  background: var(--bg);
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 10;
 }
 
 .app-header-home {
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.12);
-  padding-top: 6px;
+  padding-top: 8px;
+}
+
+.header-brand-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 4px 16px 8px;
+  width: 100%;
+}
+
+.header-logo {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.header-product-name {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.header-brand-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
 
 .header-inner {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 4px 16px 14px;
+  padding: 10px 16px;
   max-width: 960px;
   margin: 0 auto;
   width: 100%;
@@ -63,16 +97,18 @@ input {
 
 .brand {
   margin: 0;
-  font-size: 1.25rem;
-  font-weight: 800;
+  font-size: 1.125rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
 }
 
 .upload-btn {
   border: none;
-  background: rgba(255, 255, 255, 0.22);
+  background: var(--orange);
   color: white;
-  border-radius: 999px;
-  padding: 6px 12px;
+  border-radius: 14px;
+  padding: 7px 12px;
   cursor: pointer;
   font-weight: 700;
   font-size: 0.75rem;
@@ -84,10 +120,10 @@ input {
 }
 
 .header-settings-btn {
-  border: none;
-  background: rgba(255, 255, 255, 0.22);
-  color: white;
-  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  border-radius: 14px;
   width: 36px;
   height: 36px;
   display: inline-flex;
@@ -97,10 +133,10 @@ input {
 }
 
 .header-icon-btn {
-  border: none;
-  background: rgba(255, 255, 255, 0.22);
-  color: white;
-  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  border-radius: 14px;
   width: 36px;
   height: 36px;
   display: inline-flex;
@@ -111,11 +147,11 @@ input {
 }
 
 .header-text-btn {
-  border: none;
-  background: rgba(255, 255, 255, 0.22);
-  color: white;
-  border-radius: 999px;
-  padding: 6px 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 14px;
+  padding: 7px 12px;
   font-weight: 700;
   font-size: 0.75rem;
   cursor: pointer;
@@ -165,19 +201,19 @@ input {
 .tab-btn {
   background: none;
   border: none;
-  border-bottom: 3px solid transparent;
-  color: rgba(255, 255, 255, 0.78);
-  padding: 14px 4px;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  padding: 12px 4px;
   cursor: pointer;
   font-weight: 600;
-  font-size: 0.9375rem;
+  font-size: 0.875rem;
   letter-spacing: -0.02em;
 }
 
 .tab-btn-active {
-  color: white;
-  font-weight: 800;
-  border-bottom-color: white;
+  color: var(--text);
+  font-weight: 700;
+  border-bottom-color: var(--orange);
 }
 
 .app-main {
@@ -1511,10 +1547,14 @@ input {
   border: none;
   background: var(--orange);
   color: white;
-  border-radius: 10px;
+  border-radius: 14px;
   padding: 10px 16px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.btn-primary:hover {
+  background: var(--orange-dark);
 }
 
 /* Equity fund screener */

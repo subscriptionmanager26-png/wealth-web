@@ -6,10 +6,23 @@ import "./index.css";
 import "katex/dist/katex.min.css";
 import { installGlobalFetchDiagnostics } from "./lib/diagnosticsFetch";
 import { diagLog, logEnvironmentSnapshot } from "./lib/diagnosticsLog";
+import { initPostHog } from "./lib/posthog";
 
 installGlobalFetchDiagnostics();
 logEnvironmentSnapshot();
 diagLog("session", "Application boot");
+
+function deferAnalytics() {
+  const run = () => {
+    void initPostHog();
+  };
+  if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+    window.requestIdleCallback(run, { timeout: 3000 });
+  } else {
+    setTimeout(run, 1500);
+  }
+}
+deferAnalytics();
 
 if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => {

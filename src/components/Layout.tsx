@@ -124,28 +124,40 @@ export function Layout({
     <div className="app-shell">
       <header className={`app-header ${bottomTab === "home" ? "app-header-home" : ""}`}>
         {bottomTab === "home" ? (
-          <nav className="tab-nav" aria-label="Portfolio sections">
-            {HOME_TABS.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                className={`tab-btn ${homeTab === t.id ? "tab-btn-active" : ""}`}
-                onClick={() => onHomeTabChange(t.id)}
-              >
-                {t.label}
-              </button>
-            ))}
-          </nav>
+          <>
+            <div className="header-brand-row">
+              <img className="header-logo" src="/logo.png" alt="" width={28} height={28} />
+              <p className="header-product-name">PocketEdge Wealth</p>
+            </div>
+            <nav className="tab-nav" aria-label="Portfolio sections">
+              {HOME_TABS.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  className={`tab-btn ${homeTab === t.id ? "tab-btn-active" : ""}`}
+                  onClick={() => onHomeTabChange(t.id)}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </nav>
+          </>
         ) : bottomTab === "tracker" ? (
           <div className="header-inner">
-            <h1 className="brand">Tracker</h1>
+            <div className="header-brand-inline">
+              <img className="header-logo" src="/logo.png" alt="" width={28} height={28} />
+              <h1 className="brand">Tracker</h1>
+            </div>
             <button type="button" className="upload-btn" onClick={onUploadClick} disabled={uploadBusy}>
               {uploadBusy ? "Processing…" : "Add PDFs"}
             </button>
           </div>
         ) : bottomTab === "screener" ? (
           <div className="header-inner">
-            <h1 className="brand">Fund Screener</h1>
+            <div className="header-brand-inline">
+              <img className="header-logo" src="/logo.png" alt="" width={28} height={28} />
+              <h1 className="brand">Fund Screener</h1>
+            </div>
             <span className="header-spacer" />
           </div>
         ) : bottomTab === "ai" ? (
@@ -172,7 +184,10 @@ export function Layout({
           </div>
         ) : bottomTab === "account" ? (
           <div className="header-inner">
-            <h1 className="brand">My Account</h1>
+            <div className="header-brand-inline">
+              <img className="header-logo" src="/logo.png" alt="" width={28} height={28} />
+              <h1 className="brand">My Account</h1>
+            </div>
             {accountSubTab === "uploaded" ? (
               <button type="button" className="upload-btn" onClick={onUploadClick} disabled={uploadBusy}>
                 {uploadBusy ? "Saving…" : "Upload CAS"}
