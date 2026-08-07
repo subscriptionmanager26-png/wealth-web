@@ -23,7 +23,7 @@ export async function startOAuthFlow(server, redirectUrl) {
     await discoverOAuthServerInfo(server.url);
 
   const clientMetadata = {
-    client_name: "Wealth Web Tracker",
+    client_name: "PocketEdge Wealth",
     redirect_uris: [redirectUrl],
     grant_types: ["authorization_code", "refresh_token"],
     response_types: ["code"],
@@ -88,7 +88,7 @@ export async function completeOAuthFlow({ code, state }) {
 export function createTokenAuthProvider(accessToken) {
   return {
     redirectUrl: undefined,
-    clientMetadata: { client_name: "Wealth Web Tracker", redirect_uris: [] },
+    clientMetadata: { client_name: "PocketEdge Wealth", redirect_uris: [] },
     clientInformation: () => undefined,
     tokens: () => ({ access_token: accessToken, token_type: "Bearer" }),
     saveTokens: () => {},
@@ -104,7 +104,7 @@ export function oauthCallbackHtml({ serverId, tokens, error }) {
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Wealth Web — Broker authorization</title>
+    <title>PocketEdge Wealth — Broker authorization</title>
     <style>
       body { font-family: system-ui, sans-serif; background: #f8f9fb; color: #1a1d26; display: grid; place-items: center; min-height: 100vh; margin: 0; }
       .card { background: #fff; border: 1px solid #e2e6ef; border-radius: 12px; padding: 2rem; max-width: 420px; text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,.06); }
@@ -115,7 +115,7 @@ export function oauthCallbackHtml({ serverId, tokens, error }) {
   <body>
     <div class="card">
       <h1 class="${error ? "err" : "ok"}">${error ? "Authorization failed" : "Authorized!"}</h1>
-      <p>${error ? error : "You can close this tab and return to Wealth Web Tracker."}</p>
+      <p>${error ? error : "You can close this tab and return to PocketEdge Wealth."}</p>
     </div>
     <script>
       const payload = ${payload};

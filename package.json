@@ -24,6 +24,7 @@
     "decimal.js": "^10.6.0",
     "katex": "^0.17.0",
     "pdfjs-dist": "^4.10.38",
+    "posthog-js": "^1.414.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
