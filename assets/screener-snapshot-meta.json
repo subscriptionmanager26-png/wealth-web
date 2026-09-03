@@ -1,8 +1,8 @@
 {
-  "generatedAt": "2026-08-03",
-  "fetchedAt": "2026-08-03T06:23:22.888Z",
+  "generatedAt": "2026-09-03",
+  "fetchedAt": "2026-09-03T07:39:52.083Z",
   "source": "https://finapi.upvaly.com/api/mf/scheme-code",
-  "fundCount": 550,
-  "fetched": 550,
+  "fundCount": 0,
+  "fetched": 0,
   "failedCount": 0
 }
