@@ -1,14 +1,14 @@
 {
-  "generatedAt": "2026-11-25T14:08:06.880Z",
-  "fetchedAt": "2026-11-25T14:08:06.880Z",
-  "lastAttemptAt": "2026-11-25T14:08:06.880Z",
+  "generatedAt": "2026-11-26T13:44:54.133Z",
+  "fetchedAt": "2026-11-26T13:44:54.133Z",
+  "lastAttemptAt": "2026-11-26T13:44:54.133Z",
   "lastAttemptOk": true,
   "source": "https://www.niftyindices.com/BackPage/getTotalReturnIndexString",
   "mode": "recent-merge",
   "triLookbackDays": 3,
   "requestGapMs": 2500,
   "indexCount": 21,
-  "fetched": 18,
+  "fetched": 21,
   "refreshed": 21,
   "reused": 0,
   "failed": []
